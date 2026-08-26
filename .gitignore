@@ -1,0 +1,17 @@
+bin/
+obj/
+publish/
+standalone/
+runtime/
+*.exe
+*.dll
+*.pdb
+*.pak
+*.zip
+*.log
+local_state.txt*
+remote_state.txt*
+status.txt*
+.vs/
+.idea/
+.vscode/
