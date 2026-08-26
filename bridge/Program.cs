@@ -55,6 +55,10 @@ WriteAtomic(statusPath, $"starting|{role}|{DateTimeOffset.UtcNow.ToUnixTimeMilli
 long lastSequence = -1;
 long lastHello = 0;
 long lastPeerPacket = 0;
+long lastTelemetry = 0;
+string? peerName = null;
+double remoteX = 0, remoteY = 0, remoteZ = 0;
+bool hasRemoteState = false;
 using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; cancellation.Cancel(); };
 
@@ -91,6 +95,10 @@ while (!cancellation.IsCancellationRequested)
             else if (fields[1] == "STATE" && fields.Length >= 8)
             {
                 lastPeerPacket = now;
+                peerName = fields[2];
+                hasRemoteState = double.TryParse(fields[4], NumberStyles.Float, CultureInfo.InvariantCulture, out remoteX)
+                    && double.TryParse(fields[5], NumberStyles.Float, CultureInfo.InvariantCulture, out remoteY)
+                    && double.TryParse(fields[6], NumberStyles.Float, CultureInfo.InvariantCulture, out remoteZ);
                 WriteAtomic(remoteStatePath, string.Join('|', fields.Skip(2)));
             }
         }
@@ -105,6 +113,17 @@ while (!cancellation.IsCancellationRequested)
 
     var connected = peer != null && lastPeerPacket != 0 && now - lastPeerPacket < 5000;
     WriteAtomic(statusPath, $"{(connected ? "connected" : "waiting")}|{role}|{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}");
+    if (connected && hasRemoteState && peerName != null && now - lastTelemetry >= 1000
+        && TryReadPosition(localStatePath, out var localX, out var localY, out var localZ))
+    {
+        var dx = remoteX - localX;
+        var dy = remoteY - localY;
+        var dz = remoteZ - localZ;
+        var distanceMeters = Math.Sqrt(dx * dx + dy * dy + dz * dz) / 100.0;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"CONNECTED peer={peerName} pos=({remoteX:F1},{remoteY:F1},{remoteZ:F1}) distance={distanceMeters:F1}m"));
+        lastTelemetry = now;
+    }
     await Task.Delay(25, cancellation.Token).ConfigureAwait(false);
 }
 
@@ -126,6 +145,22 @@ static bool TryReadState(string path, out string payload, out long sequence)
         if (separator < 1 || !long.TryParse(value[..separator], out sequence)) return false;
         payload = value;
         return true;
+    }
+    catch (IOException) { return false; }
+    catch (UnauthorizedAccessException) { return false; }
+}
+
+static bool TryReadPosition(string path, out double x, out double y, out double z)
+{
+    x = y = z = 0;
+    try
+    {
+        if (!File.Exists(path)) return false;
+        var fields = File.ReadAllText(path).Trim().Split('|');
+        return fields.Length >= 4
+            && double.TryParse(fields[1], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+            && double.TryParse(fields[2], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+            && double.TryParse(fields[3], NumberStyles.Float, CultureInfo.InvariantCulture, out z);
     }
     catch (IOException) { return false; }
     catch (UnauthorizedAccessException) { return false; }

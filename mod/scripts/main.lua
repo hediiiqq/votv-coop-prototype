@@ -110,9 +110,11 @@ local function draw_remote_marker()
     end
     if not kismet_system_library or not kismet_system_library:IsValid() then return end
 
-    local center = { X = last_remote_x, Y = last_remote_y, Z = last_remote_z + 50.0 }
+    local local_position = pawn:K2_GetActorLocation()
+    local center = { X = last_remote_x, Y = last_remote_y, Z = last_remote_z + 65.0 }
     local color = { R = 1.0, G = 0.05, B = 0.05, A = 1.0 }
-    kismet_system_library:DrawDebugSphere(pawn, center, 45.0, 16, color, 0.12, 3.0)
+    kismet_system_library:DrawDebugLine(pawn, local_position, center, color, 0.12, 4.0)
+    kismet_system_library:DrawDebugSphere(pawn, center, 90.0, 20, color, 0.12, 5.0)
 end
 
 local function tick()
