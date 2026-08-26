@@ -25,8 +25,12 @@ local status_file = bridge_dir .. "/status.txt"
 local sequence = 0
 local last_remote_sequence = -1
 local last_remote_name = ""
-local last_remote_x, last_remote_y, last_remote_z = 0, 0, 0
-local last_remote_yaw = 0
+local target_remote_x, target_remote_y, target_remote_z = 0, 0, 0
+local target_remote_yaw = 0
+local rendered_remote_x, rendered_remote_y, rendered_remote_z = 0, 0, 0
+local rendered_remote_yaw = 0
+local remote_has_rendered_state = false
+local remote_smoothing = 0.2
 local last_remote_update = 0
 local kismet_system_library = nil
 
@@ -69,6 +73,14 @@ local function split(value)
     return result
 end
 
+local function normalize_yaw(yaw)
+    return (yaw + 180.0) % 360.0 - 180.0
+end
+
+local function is_finite_number(value)
+    return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+end
+
 local function capture_local_player()
     local controller = UEHelpers:GetPlayerController()
     if not controller or not controller:IsValid() then return end
@@ -87,19 +99,38 @@ local function consume_remote_player()
     -- Bridge writes: name|sequence|x|y|z|yaw
     if #fields < 6 then return end
     local remote_sequence = tonumber(fields[2])
-    if not remote_sequence or remote_sequence == last_remote_sequence then return end
+    local remote_x = tonumber(fields[3])
+    local remote_y = tonumber(fields[4])
+    local remote_z = tonumber(fields[5])
+    local remote_yaw = tonumber(fields[6])
+    if not is_finite_number(remote_sequence) or remote_sequence == last_remote_sequence then return end
+    if not is_finite_number(remote_x) or not is_finite_number(remote_y)
+        or not is_finite_number(remote_z) or not is_finite_number(remote_yaw) then return end
 
     last_remote_sequence = remote_sequence
     last_remote_name = fields[1]
-    last_remote_x = tonumber(fields[3]) or 0
-    last_remote_y = tonumber(fields[4]) or 0
-    last_remote_z = tonumber(fields[5]) or 0
-    last_remote_yaw = tonumber(fields[6]) or 0
+    target_remote_x = remote_x
+    target_remote_y = remote_y
+    target_remote_z = remote_z
+    target_remote_yaw = normalize_yaw(remote_yaw)
+    if not remote_has_rendered_state then
+        rendered_remote_x = target_remote_x
+        rendered_remote_y = target_remote_y
+        rendered_remote_z = target_remote_z
+        rendered_remote_yaw = target_remote_yaw
+        remote_has_rendered_state = true
+    end
     last_remote_update = os.clock()
 end
 
 local function draw_remote_marker()
     if last_remote_sequence < 0 or os.clock() - last_remote_update > 2.0 then return end
+    rendered_remote_x = rendered_remote_x + (target_remote_x - rendered_remote_x) * remote_smoothing
+    rendered_remote_y = rendered_remote_y + (target_remote_y - rendered_remote_y) * remote_smoothing
+    rendered_remote_z = rendered_remote_z + (target_remote_z - rendered_remote_z) * remote_smoothing
+    local yaw_delta = normalize_yaw(target_remote_yaw - rendered_remote_yaw)
+    rendered_remote_yaw = normalize_yaw(rendered_remote_yaw + yaw_delta * remote_smoothing)
+
     local controller = UEHelpers:GetPlayerController()
     if not controller or not controller:IsValid() then return end
     local pawn = controller.Pawn
@@ -110,11 +141,17 @@ local function draw_remote_marker()
     end
     if not kismet_system_library or not kismet_system_library:IsValid() then return end
 
-    local local_position = pawn:K2_GetActorLocation()
-    local center = { X = last_remote_x, Y = last_remote_y, Z = last_remote_z + 65.0 }
+    local center = { X = rendered_remote_x, Y = rendered_remote_y, Z = rendered_remote_z + 90.0 }
     local color = { R = 1.0, G = 0.05, B = 0.05, A = 1.0 }
-    kismet_system_library:DrawDebugLine(pawn, local_position, center, color, 0.12, 4.0)
-    kismet_system_library:DrawDebugSphere(pawn, center, 90.0, 20, color, 0.12, 5.0)
+    local capsule_rotation = { Pitch = 0.0, Yaw = rendered_remote_yaw, Roll = 0.0 }
+    local yaw_radians = math.rad(rendered_remote_yaw)
+    local facing_end = {
+        X = center.X + math.cos(yaw_radians) * 70.0,
+        Y = center.Y + math.sin(yaw_radians) * 70.0,
+        Z = center.Z
+    }
+    kismet_system_library:DrawDebugCapsule(pawn, center, 90.0, 34.0, capsule_rotation, color, 0.12, 4.0)
+    kismet_system_library:DrawDebugLine(pawn, center, facing_end, color, 0.12, 4.0)
 end
 
 local function tick()
@@ -129,7 +166,7 @@ end
 RegisterKeyBind(Key.F8, function()
     local status = (read_all(status_file) or "bridge not running"):gsub("%s+$", "")
     print(string.format("%s%s; remote %s at X=%.1f Y=%.1f Z=%.1f\n",
-        MOD, status, last_remote_name, last_remote_x, last_remote_y, last_remote_z))
+        MOD, status, last_remote_name, target_remote_x, target_remote_y, target_remote_z))
 end)
 
 start_bridge()
