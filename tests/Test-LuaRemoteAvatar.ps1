@@ -34,7 +34,6 @@ function Lerp-RemoteYaw([double] $Rendered, [double] $Target, [double] $Alpha) {
 
 $consumeBlock = Get-LuaFunctionBlock 'consume_remote_player'
 $drawBlock = Get-LuaFunctionBlock 'draw_remote_marker'
-
 # Non-finite network values must be rejected before any remote state mutation.
 Assert-True (Is-FiniteNumber 42.0) 'finite fixture must be accepted'
 Assert-True (-not (Is-FiniteNumber $null)) 'nil fixture must be rejected'
