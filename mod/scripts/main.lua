@@ -60,7 +60,7 @@ end
 local function read_all(path)
     local file = io.open(path, "r")
     if not file then return nil end
-    local value = file:read("*a")
+    local value = file:read()
     file:close()
     return value
 end
