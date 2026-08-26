@@ -34,6 +34,15 @@ function Lerp-RemoteYaw([double] $Rendered, [double] $Target, [double] $Alpha) {
 
 $consumeBlock = Get-LuaFunctionBlock 'consume_remote_player'
 $drawBlock = Get-LuaFunctionBlock 'draw_remote_marker'
+$readAllStart = $source.IndexOf('local function read_all(path)')
+Assert-True ($readAllStart -ge 0) 'Lua function read_all must exist'
+$readAllEnd = $source.IndexOf("`nlocal function ", $readAllStart + 1)
+if ($readAllEnd -lt 0) { $readAllEnd = $source.Length }
+$readAllBlock = $source.Substring($readAllStart, $readAllEnd - $readAllStart)
+
+# UE4SS rejects the Lua "*a" read format; one-line records must use the default read mode.
+Assert-True ($readAllBlock -match 'file:read\(\)') 'read_all must read without a format argument'
+Assert-True ($readAllBlock -notmatch 'file:read\(\s*"\*a"\s*\)') 'read_all must not use the rejected *a format'
 
 # Non-finite network values must be rejected before any remote state mutation.
 Assert-True (Is-FiniteNumber 42.0) 'finite fixture must be accepted'
