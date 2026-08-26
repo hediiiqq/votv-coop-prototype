@@ -23,12 +23,17 @@ This task validates the guarded worker lifecycle only after the user installs, a
 
 ## Files to modify
 
-- Create one focused slugify implementation file under a new `tools/` directory.
-- Create one matching offline test file under `tests/`.
+- Create `tools/slugify.py`.
+- Create `tests/test_slugify.py`.
 
 ## Tests
 
-Run the new test file and `scripts/review.ps1`. Report exact commands and results.
+Run only these exact commands, separately and in this order:
+
+1. `python tests/test_slugify.py`
+2. `pwsh -NoProfile -File scripts/review.ps1`
+
+Do not run version checks, environment discovery commands, directory-listing commands, or any other terminal command.
 
 ## Research
 

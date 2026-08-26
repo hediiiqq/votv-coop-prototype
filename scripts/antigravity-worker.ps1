@@ -100,6 +100,7 @@ if ($LASTEXITCODE -ne 0) { throw 'agy --help failed.' }
 if ($helpText -notmatch '(?m)(--prompt|-p\b)') { throw 'Installed agy does not advertise a supported prompt flag.' }
 if ($helpText -notmatch '--output-format') { throw 'Installed agy does not advertise --output-format.' }
 if ($helpText -notmatch '--add-dir') { throw 'Installed agy does not advertise --add-dir.' }
+if ($helpText -notmatch '--mode') { throw 'Installed agy does not advertise --mode.' }
 
 $taskText = Get-Content -LiteralPath $resolvedTask -Raw
 $prompt = @"
@@ -107,7 +108,7 @@ You are an implementation worker operating only inside the assigned Git worktree
 
 First inspect the repository and obey every applicable AGENTS.md instruction. Implement only the task below. Do not change unrelated files. Write or update tests for the requested behavior. Do not change main or master, do not merge, and do not add credentials, tokens, or other secrets.
 
-For every terminal command, set the working directory to the exact assigned worktree above. Never use the Antigravity scratch directory. Run exactly ``git status`` as the initial terminal command. Never combine shell commands with semicolons or other command separators. Use file tools, not shell directory-listing commands, to inspect files.
+For every terminal command, set the working directory to the exact assigned worktree above. Never use the Antigravity scratch directory. Run exactly ``git status`` as the initial terminal command. Never combine shell commands with semicolons or other command separators. Use file tools, not shell directory-listing commands, to inspect files. Do not run version checks or environment discovery commands. After the initial git status, run only the exact commands explicitly listed under the task's Tests section.
 
 TASK:
 $taskText
@@ -119,7 +120,7 @@ if ($DryRun) {
     Write-Output 'DRY RUN: Antigravity will not be invoked and no quota will be consumed.'
     Write-Output "Worktree: $resolvedWorktree"
     Write-Output "Branch: $($selected.Branch)"
-    Write-Output 'Command shape: agy --add-dir <worktree> -p <worker-prompt> --output-format json'
+    Write-Output 'Command shape: agy --mode accept-edits --add-dir <worktree> -p <worker-prompt> --output-format json'
     Write-Output 'Worker prompt:'
     Write-Output $prompt
     exit 0
@@ -128,7 +129,7 @@ if ($DryRun) {
 $exitCode = 1
 Push-Location -LiteralPath $resolvedWorktree
 try {
-    $resultLines = @(& agy --add-dir $resolvedWorktree -p $prompt --output-format json)
+    $resultLines = @(& agy --mode accept-edits --add-dir $resolvedWorktree -p $prompt --output-format json)
     $exitCode = $LASTEXITCODE
     $resultText = $resultLines -join [System.Environment]::NewLine
     if (-not [string]::IsNullOrWhiteSpace($resultText)) { Write-Output $resultText }

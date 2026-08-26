@@ -28,7 +28,7 @@ try {
     Set-Content -LiteralPath (Join-Path $fakeBin 'npm.cmd') -Encoding ascii -Value "@echo 11.0.0"
     Set-Content -LiteralPath (Join-Path $fakeBin 'agy.ps1') -Encoding utf8 -Value @'
 if ($args[0] -eq '--help') {
-    Write-Output 'Usage: agy --add-dir <path> --prompt <text> --output-format json'
+    Write-Output 'Usage: agy --mode <mode> --add-dir <path> --prompt <text> --output-format json'
     exit 0
 }
 [pscustomobject]@{
@@ -93,8 +93,11 @@ exit [int]$env:FAKE_AGY_EXIT
     $invocation = Get-Content -Raw -LiteralPath $agyLog | ConvertFrom-Json
     $addDirIndex = [array]::IndexOf([object[]]$invocation.Arguments, '--add-dir')
     Assert-True ($addDirIndex -ge 0 -and $invocation.Arguments[$addDirIndex + 1] -eq $okTree) 'Worker must bind Antigravity to the selected worktree with --add-dir.'
+    $modeIndex = [array]::IndexOf([object[]]$invocation.Arguments, '--mode')
+    Assert-True ($modeIndex -ge 0 -and $invocation.Arguments[$modeIndex + 1] -eq 'accept-edits') 'Worker must allow workspace file edits without interactive artifact prompts.'
     $promptArgument = @($invocation.Arguments | Where-Object { $_ -match 'implementation worker' }) | Select-Object -First 1
     Assert-True ($promptArgument -match [regex]::Escape($okTree) -and $promptArgument -match 'run exactly `git status`' -and $promptArgument -match 'Never combine shell commands') 'Worker prompt must pin command execution to the worktree and deterministic single commands.'
+    Assert-True ($promptArgument -match 'Do not run version checks' -and $promptArgument -match 'only.*commands.*Tests') 'Worker prompt must prohibit unapproved discovery commands and restrict execution to the task test commands.'
 
     $env:FAKE_AGY_MODE = 'empty-success'
     $result = Invoke-Worker @('-TaskPath',$task,'-WorktreePath',$okTree)
