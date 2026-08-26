@@ -15,3 +15,4 @@ status.txt*
 .vs/
 .idea/
 .vscode/
+.worktrees/
