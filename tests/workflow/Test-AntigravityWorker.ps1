@@ -9,6 +9,7 @@ $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('agy-worker-test-' + [g
 $fixture = Join-Path $tempRoot 'repo'
 $fakeBin = Join-Path $tempRoot 'bin'
 $task = Join-Path $tempRoot 'TASK.md'
+$agyLog = Join-Path $tempRoot 'agy-invocation.json'
 $script:failures = 0
 
 function Assert-True([bool]$condition, [string]$message) {
@@ -25,18 +26,28 @@ try {
     Set-Content -LiteralPath $task -Encoding utf8 -Value "# Task`n`n## Goal`nImplement fixture behavior."
     Set-Content -LiteralPath (Join-Path $fakeBin 'node.cmd') -Encoding ascii -Value "@echo v24.0.0"
     Set-Content -LiteralPath (Join-Path $fakeBin 'npm.cmd') -Encoding ascii -Value "@echo 11.0.0"
-    Set-Content -LiteralPath (Join-Path $fakeBin 'agy.cmd') -Encoding ascii -Value @'
-@echo off
-if "%1"=="--help" (
-  echo Usage: agy --prompt ^<text^> --output-format json
-  exit /b 0
-)
-echo {"status":"SUCCESS","response":"fixture"}
-exit /b %FAKE_AGY_EXIT%
+    Set-Content -LiteralPath (Join-Path $fakeBin 'agy.ps1') -Encoding utf8 -Value @'
+if ($args[0] -eq '--help') {
+    Write-Output 'Usage: agy --add-dir <path> --prompt <text> --output-format json'
+    exit 0
+}
+[pscustomobject]@{
+    Cwd = (Get-Location).Path
+    Arguments = @($args)
+} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $env:FAKE_AGY_LOG -Encoding utf8
+if ($env:FAKE_AGY_MODE -eq 'empty-success') {
+    Write-Output '{"status":"SUCCESS","response":""}'
+}
+else {
+    Write-Output '{"status":"SUCCESS","response":"fixture"}'
+}
+exit [int]$env:FAKE_AGY_EXIT
 '@
     $oldPath = $env:Path
     $env:Path = "$fakeBin;$env:Path"
     $env:FAKE_AGY_EXIT = '0'
+    $env:FAKE_AGY_LOG = $agyLog
+    $env:FAKE_AGY_MODE = 'success'
 
     git -C $fixture init -b main | Out-Null
     git -C $fixture config user.email test@example.invalid
@@ -77,6 +88,19 @@ exit /b %FAKE_AGY_EXIT%
     Assert-True ($result.Output -match 'DRY RUN' -and $result.Output -match 'Implement fixture behavior') 'Dry-run must show the task-derived prompt.'
     Assert-True ($result.Output -match 'changed files' -and $result.Output -match 'unresolved risks') 'Worker prompt must require changed files and risks.'
 
+    $result = Invoke-Worker @('-TaskPath',$task,'-WorktreePath',$okTree)
+    Assert-True ($result.ExitCode -eq 0) "A valid live invocation must succeed. Output: $($result.Output)"
+    $invocation = Get-Content -Raw -LiteralPath $agyLog | ConvertFrom-Json
+    $addDirIndex = [array]::IndexOf([object[]]$invocation.Arguments, '--add-dir')
+    Assert-True ($addDirIndex -ge 0 -and $invocation.Arguments[$addDirIndex + 1] -eq $okTree) 'Worker must bind Antigravity to the selected worktree with --add-dir.'
+    $promptArgument = @($invocation.Arguments | Where-Object { $_ -match 'implementation worker' }) | Select-Object -First 1
+    Assert-True ($promptArgument -match [regex]::Escape($okTree) -and $promptArgument -match 'run exactly `git status`' -and $promptArgument -match 'Never combine shell commands') 'Worker prompt must pin command execution to the worktree and deterministic single commands.'
+
+    $env:FAKE_AGY_MODE = 'empty-success'
+    $result = Invoke-Worker @('-TaskPath',$task,'-WorktreePath',$okTree)
+    Assert-True ($result.ExitCode -ne 0 -and $result.Output -match 'empty response|permission') 'Empty SUCCESS output must fail because it can represent a headless permission soft-deny.'
+
+    $env:FAKE_AGY_MODE = 'success'
     $env:FAKE_AGY_EXIT = '23'
     $result = Invoke-Worker @('-TaskPath',$task,'-WorktreePath',$okTree)
     Assert-True ($result.ExitCode -eq 23) 'The worker must propagate a nonzero agy exit code.'
@@ -84,6 +108,8 @@ exit /b %FAKE_AGY_EXIT%
 finally {
     $env:Path = $oldPath
     Remove-Item Env:FAKE_AGY_EXIT -ErrorAction SilentlyContinue
+    Remove-Item Env:FAKE_AGY_LOG -ErrorAction SilentlyContinue
+    Remove-Item Env:FAKE_AGY_MODE -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }
 

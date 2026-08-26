@@ -99,12 +99,15 @@ $helpText = (& agy --help 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0) { throw 'agy --help failed.' }
 if ($helpText -notmatch '(?m)(--prompt|-p\b)') { throw 'Installed agy does not advertise a supported prompt flag.' }
 if ($helpText -notmatch '--output-format') { throw 'Installed agy does not advertise --output-format.' }
+if ($helpText -notmatch '--add-dir') { throw 'Installed agy does not advertise --add-dir.' }
 
 $taskText = Get-Content -LiteralPath $resolvedTask -Raw
 $prompt = @"
-You are an implementation worker operating only inside the assigned Git worktree.
+You are an implementation worker operating only inside the assigned Git worktree: $resolvedWorktree
 
 First inspect the repository and obey every applicable AGENTS.md instruction. Implement only the task below. Do not change unrelated files. Write or update tests for the requested behavior. Do not change main or master, do not merge, and do not add credentials, tokens, or other secrets.
+
+For every terminal command, set the working directory to the exact assigned worktree above. Never use the Antigravity scratch directory. Run exactly ``git status`` as the initial terminal command. Never combine shell commands with semicolons or other command separators. Use file tools, not shell directory-listing commands, to inspect files.
 
 TASK:
 $taskText
@@ -116,7 +119,7 @@ if ($DryRun) {
     Write-Output 'DRY RUN: Antigravity will not be invoked and no quota will be consumed.'
     Write-Output "Worktree: $resolvedWorktree"
     Write-Output "Branch: $($selected.Branch)"
-    Write-Output 'Command shape: agy -p <worker-prompt> --output-format json'
+    Write-Output 'Command shape: agy --add-dir <worktree> -p <worker-prompt> --output-format json'
     Write-Output 'Worker prompt:'
     Write-Output $prompt
     exit 0
@@ -125,8 +128,24 @@ if ($DryRun) {
 $exitCode = 1
 Push-Location -LiteralPath $resolvedWorktree
 try {
-    & agy -p $prompt --output-format json
+    $resultLines = @(& agy --add-dir $resolvedWorktree -p $prompt --output-format json)
     $exitCode = $LASTEXITCODE
+    $resultText = $resultLines -join [System.Environment]::NewLine
+    if (-not [string]::IsNullOrWhiteSpace($resultText)) { Write-Output $resultText }
+    if ($exitCode -eq 0) {
+        try {
+            $resultEnvelope = $resultText | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            throw 'Antigravity returned invalid or empty JSON output.'
+        }
+        if ($resultEnvelope.status -ne 'SUCCESS') {
+            throw "Antigravity returned status '$($resultEnvelope.status)'."
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$resultEnvelope.response)) {
+            throw 'Antigravity returned an empty response; a headless permission request may have been soft-denied.'
+        }
+    }
 }
 finally {
     Pop-Location
