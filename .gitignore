@@ -15,3 +15,13 @@ status.txt*
 .vs/
 .idea/
 .vscode/
+.worktrees/
+.env
+.env.*
+!.env.example
+.secrets/
+.credentials/
+tasks/research/*.md
+!tasks/research/.gitkeep
+__pycache__/
+*.pyc
