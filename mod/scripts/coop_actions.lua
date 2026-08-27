@@ -36,6 +36,10 @@ local function sanitize_action_name(name)
 end
 
 local function emit_local_action(action_name)
+    if last_local_action_time > 0 and (os.clock() - last_local_action_time) < 0.5 then
+        return
+    end
+
     local controller = UEHelpers:GetPlayerController()
     if not controller or not controller:IsValid() then
         print(string.format("%sF9 ignored: no valid player pawn\n", MOD))

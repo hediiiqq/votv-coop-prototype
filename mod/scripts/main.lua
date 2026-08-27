@@ -70,18 +70,24 @@ local function tick()
 end
 
 RegisterKeyBind(Key.F8, function()
-    local status = (coop_util.read_all(status_file) or "bridge not running"):gsub("%s+$", "")
-    local name, x, y, z = avatar.get_status_info()
-    print(string.format("%s%s; remote %s at X=%.1f Y=%.1f Z=%.1f\n",
-        MOD, status, name, x, y, z))
+    ExecuteInGameThread(function()
+        local status = (coop_util.read_all(status_file) or "bridge not running"):gsub("%s+$", "")
+        local name, x, y, z = avatar.get_status_info()
+        print(string.format("%s%s; remote %s at X=%.1f Y=%.1f Z=%.1f\n",
+            MOD, status, name, x, y, z))
+    end)
 end)
 
 RegisterKeyBind(Key.F9, function()
-    actions.emit_local_action("Ping")
+    ExecuteInGameThread(function()
+        actions.emit_local_action("Ping")
+    end)
 end)
 
-RegisterKeyBind(Key.F10, function()
-    diag.inspect_object_under_crosshair()
+RegisterKeyBind(Key.F7, function()
+    ExecuteInGameThread(function()
+        diag.inspect_object_under_crosshair()
+    end)
 end)
 
 coop_bridge.start_bridge(mod_dir, bridge_dir, config, coop_util)
