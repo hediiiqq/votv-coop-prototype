@@ -84,6 +84,24 @@ try {
             throw "ACTION packet polluted host remote_state.txt: $state"
         }
     }
+
+    # Test 4: Verify bridge console logs for ACTION send and receive
+    $deadline = [DateTime]::UtcNow.AddSeconds(2)
+    $hostLogContent = ''
+    $clientLogContent = ''
+    do {
+        Start-Sleep -Milliseconds 50
+        $hostLogContent = if (Test-Path $hostLog) { Get-Content $hostLog -Raw } else { '' }
+        $clientLogContent = if (Test-Path $clientLog) { Get-Content $clientLog -Raw } else { '' }
+    } while ((($hostLogContent -notmatch 'ACTION sent' -or $hostLogContent -notmatch 'ACTION received') -or
+              ($clientLogContent -notmatch 'ACTION sent' -or $clientLogContent -notmatch 'ACTION received')) -and [DateTime]::UtcNow -lt $deadline)
+
+    if ($hostLogContent -notmatch 'ACTION sent' -or $hostLogContent -notmatch 'ACTION received') {
+        throw "Host log missing expected ACTION console lines.`nHost log:`n$hostLogContent"
+    }
+    if ($clientLogContent -notmatch 'ACTION sent' -or $clientLogContent -notmatch 'ACTION received') {
+        throw "Client log missing expected ACTION console lines.`nClient log:`n$clientLogContent"
+    }
 }
 finally {
     if ($hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force; $hostProcess.WaitForExit(1000) | Out-Null }

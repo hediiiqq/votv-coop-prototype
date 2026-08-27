@@ -104,19 +104,59 @@ local function draw_local_action_marker()
     end
     if not kismet_system_library or not kismet_system_library:IsValid() then return end
 
-    local center = { X = rendered_local_action_x, Y = rendered_local_action_y, Z = rendered_local_action_z + 90.0 }
     local color = { R = 1.0, G = 0.85, B = 0.0, A = 1.0 }
-    local capsule_rotation = { Pitch = 0.0, Yaw = rendered_local_action_yaw, Roll = 0.0 }
-    local yaw_radians = math.rad(rendered_local_action_yaw)
-    local facing_end = {
-        X = center.X + math.cos(yaw_radians) * 70.0,
-        Y = center.Y + math.sin(yaw_radians) * 70.0,
-        Z = center.Z
+    local base_x = rendered_local_action_x
+    local base_y = rendered_local_action_y
+    local base_z = rendered_local_action_z
+    local yaw = rendered_local_action_yaw
+
+    -- Vertical beacon pillar above player head
+    local pillar_bottom = { X = base_x, Y = base_y, Z = base_z + 180.0 }
+    local pillar_top = { X = base_x, Y = base_y, Z = base_z + 480.0 }
+    kismet_system_library:DrawDebugLine(pawn, pillar_bottom, pillar_top, color, 0.12, 6.0)
+
+    -- Above-head beacon capsule
+    local beacon_center = { X = base_x, Y = base_y, Z = base_z + 240.0 }
+    local capsule_rotation = { Pitch = 0.0, Yaw = yaw, Roll = 0.0 }
+    kismet_system_library:DrawDebugCapsule(pawn, beacon_center, 40.0, 30.0, capsule_rotation, color, 0.12, 4.0)
+
+    -- Horizontal cross at beacon center
+    local cross_arm_len = 45.0
+    local cross_x1 = { X = beacon_center.X - cross_arm_len, Y = beacon_center.Y, Z = beacon_center.Z }
+    local cross_x2 = { X = beacon_center.X + cross_arm_len, Y = beacon_center.Y, Z = beacon_center.Z }
+    local cross_y1 = { X = beacon_center.X, Y = beacon_center.Y - cross_arm_len, Z = beacon_center.Z }
+    local cross_y2 = { X = beacon_center.X, Y = beacon_center.Y + cross_arm_len, Z = beacon_center.Z }
+    kismet_system_library:DrawDebugLine(pawn, cross_x1, cross_x2, color, 0.12, 4.0)
+    kismet_system_library:DrawDebugLine(pawn, cross_y1, cross_y2, color, 0.12, 4.0)
+
+    -- Directional arrow preserving yaw
+    local yaw_radians = math.rad(yaw)
+    local arrow_len = 120.0
+    local arrow_tip = {
+        X = beacon_center.X + math.cos(yaw_radians) * arrow_len,
+        Y = beacon_center.Y + math.sin(yaw_radians) * arrow_len,
+        Z = beacon_center.Z
     }
-    kismet_system_library:DrawDebugCapsule(pawn, center, 90.0, 34.0, capsule_rotation, color, 0.12, 4.0)
-    kismet_system_library:DrawDebugLine(pawn, center, facing_end, color, 0.12, 4.0)
+    kismet_system_library:DrawDebugLine(pawn, beacon_center, arrow_tip, color, 0.12, 6.0)
+
+    local left_yaw = math.rad(yaw + 150.0)
+    local right_yaw = math.rad(yaw - 150.0)
+    local wing_len = 35.0
+    local arrow_left = {
+        X = arrow_tip.X + math.cos(left_yaw) * wing_len,
+        Y = arrow_tip.Y + math.sin(left_yaw) * wing_len,
+        Z = arrow_tip.Z
+    }
+    local arrow_right = {
+        X = arrow_tip.X + math.cos(right_yaw) * wing_len,
+        Y = arrow_tip.Y + math.sin(right_yaw) * wing_len,
+        Z = arrow_tip.Z
+    }
+    kismet_system_library:DrawDebugLine(pawn, arrow_tip, arrow_left, color, 0.12, 5.0)
+    kismet_system_library:DrawDebugLine(pawn, arrow_tip, arrow_right, color, 0.12, 5.0)
+
     pcall(function()
-        kismet_system_library:DrawDebugString(pawn, { X = center.X, Y = center.Y, Z = center.Z + 95.0 }, last_local_action_name or "Ping", pawn, color, 0.12)
+        kismet_system_library:DrawDebugString(pawn, { X = base_x, Y = base_y, Z = base_z + 500.0 }, last_local_action_name or "Ping", pawn, color, 0.12)
     end)
 end
 
@@ -134,20 +174,60 @@ local function draw_remote_action_marker()
     end
     if not kismet_system_library or not kismet_system_library:IsValid() then return end
 
-    local center = { X = rendered_action_x, Y = rendered_action_y, Z = rendered_action_z + 90.0 }
     local color = { R = 0.0, G = 1.0, B = 1.0, A = 1.0 }
-    local capsule_rotation = { Pitch = 0.0, Yaw = rendered_action_yaw, Roll = 0.0 }
-    local yaw_radians = math.rad(rendered_action_yaw)
-    local facing_end = {
-        X = center.X + math.cos(yaw_radians) * 70.0,
-        Y = center.Y + math.sin(yaw_radians) * 70.0,
-        Z = center.Z
+    local base_x = rendered_action_x
+    local base_y = rendered_action_y
+    local base_z = rendered_action_z
+    local yaw = rendered_action_yaw
+
+    -- Vertical beacon pillar above avatar head
+    local pillar_bottom = { X = base_x, Y = base_y, Z = base_z + 180.0 }
+    local pillar_top = { X = base_x, Y = base_y, Z = base_z + 480.0 }
+    kismet_system_library:DrawDebugLine(pawn, pillar_bottom, pillar_top, color, 0.12, 6.0)
+
+    -- Above-head beacon capsule
+    local beacon_center = { X = base_x, Y = base_y, Z = base_z + 240.0 }
+    local capsule_rotation = { Pitch = 0.0, Yaw = yaw, Roll = 0.0 }
+    kismet_system_library:DrawDebugCapsule(pawn, beacon_center, 40.0, 30.0, capsule_rotation, color, 0.12, 4.0)
+
+    -- Horizontal cross at beacon center
+    local cross_arm_len = 45.0
+    local cross_x1 = { X = beacon_center.X - cross_arm_len, Y = beacon_center.Y, Z = beacon_center.Z }
+    local cross_x2 = { X = beacon_center.X + cross_arm_len, Y = beacon_center.Y, Z = beacon_center.Z }
+    local cross_y1 = { X = beacon_center.X, Y = beacon_center.Y - cross_arm_len, Z = beacon_center.Z }
+    local cross_y2 = { X = beacon_center.X, Y = beacon_center.Y + cross_arm_len, Z = beacon_center.Z }
+    kismet_system_library:DrawDebugLine(pawn, cross_x1, cross_x2, color, 0.12, 4.0)
+    kismet_system_library:DrawDebugLine(pawn, cross_y1, cross_y2, color, 0.12, 4.0)
+
+    -- Directional arrow preserving yaw
+    local yaw_radians = math.rad(yaw)
+    local arrow_len = 120.0
+    local arrow_tip = {
+        X = beacon_center.X + math.cos(yaw_radians) * arrow_len,
+        Y = beacon_center.Y + math.sin(yaw_radians) * arrow_len,
+        Z = beacon_center.Z
     }
-    kismet_system_library:DrawDebugCapsule(pawn, center, 90.0, 34.0, capsule_rotation, color, 0.12, 4.0)
-    kismet_system_library:DrawDebugLine(pawn, center, facing_end, color, 0.12, 4.0)
+    kismet_system_library:DrawDebugLine(pawn, beacon_center, arrow_tip, color, 0.12, 6.0)
+
+    local left_yaw = math.rad(yaw + 150.0)
+    local right_yaw = math.rad(yaw - 150.0)
+    local wing_len = 35.0
+    local arrow_left = {
+        X = arrow_tip.X + math.cos(left_yaw) * wing_len,
+        Y = arrow_tip.Y + math.sin(left_yaw) * wing_len,
+        Z = arrow_tip.Z
+    }
+    local arrow_right = {
+        X = arrow_tip.X + math.cos(right_yaw) * wing_len,
+        Y = arrow_tip.Y + math.sin(right_yaw) * wing_len,
+        Z = arrow_tip.Z
+    }
+    kismet_system_library:DrawDebugLine(pawn, arrow_tip, arrow_left, color, 0.12, 5.0)
+    kismet_system_library:DrawDebugLine(pawn, arrow_tip, arrow_right, color, 0.12, 5.0)
+
     pcall(function()
         local label = (last_remote_peer_name ~= "" and (last_remote_peer_name .. ": " .. last_remote_action_name)) or last_remote_action_name or "Ping"
-        kismet_system_library:DrawDebugString(pawn, { X = center.X, Y = center.Y, Z = center.Z + 95.0 }, label, pawn, color, 0.12)
+        kismet_system_library:DrawDebugString(pawn, { X = base_x, Y = base_y, Z = base_z + 500.0 }, label, pawn, color, 0.12)
     end)
 end
 

@@ -360,6 +360,8 @@ Assert-True ($drawLocalActionBlock -match 'DrawDebugCapsule') 'local action mark
 Assert-True ($drawLocalActionBlock -match 'DrawDebugLine') 'local action marker must draw debug facing line'
 Assert-True ($drawLocalActionBlock -match 'DrawDebugString') 'local action marker must include guarded DrawDebugString'
 Assert-True ($drawLocalActionBlock -match 'pcall\(function\(\)') 'local action marker DrawDebugString must be guarded with pcall'
+Assert-True ($drawLocalActionBlock -match 'base_z\s*\+\s*180\.0' -and $drawLocalActionBlock -match 'base_z\s*\+\s*240\.0') 'local action marker must position beacon above player head'
+Assert-True ($drawLocalActionBlock -match 'math\.rad\(yaw\s*\+\s*150\.0\)' -and $drawLocalActionBlock -match 'math\.rad\(yaw\s*-\s*150\.0\)') 'local action marker must draw directional arrow wings'
 
 # Remote action marker rendering
 Assert-True ($drawRemoteActionBlock -match 'last_remote_action_sequence\s*<\s*0') 'remote action marker must check remote action sequence validity'
@@ -368,6 +370,8 @@ Assert-True ($drawRemoteActionBlock -match 'DrawDebugCapsule') 'remote action ma
 Assert-True ($drawRemoteActionBlock -match 'DrawDebugLine') 'remote action marker must draw debug facing line'
 Assert-True ($drawRemoteActionBlock -match 'DrawDebugString') 'remote action marker must include guarded DrawDebugString'
 Assert-True ($drawRemoteActionBlock -match 'pcall\(function\(\)') 'remote action marker DrawDebugString must be guarded with pcall'
+Assert-True ($drawRemoteActionBlock -match 'base_z\s*\+\s*180\.0' -and $drawRemoteActionBlock -match 'base_z\s*\+\s*240\.0') 'remote action marker must position beacon above avatar head'
+Assert-True ($drawRemoteActionBlock -match 'math\.rad\(yaw\s*\+\s*150\.0\)' -and $drawRemoteActionBlock -match 'math\.rad\(yaw\s*-\s*150\.0\)') 'remote action marker must draw directional arrow wings'
 
 # Distinct colors for local and remote action markers
 Assert-True ($drawLocalActionBlock -match 'R\s*=\s*1\.0,\s*G\s*=\s*0\.85,\s*B\s*=\s*0\.0') 'local action marker must use distinct local color'

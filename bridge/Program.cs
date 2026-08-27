@@ -193,7 +193,9 @@ using (udp)
                 else if (fields[1] == "ACTION" && fields.Length >= 9)
                 {
                     lastPeerPacket = now;
-                    WriteAtomic(remoteActionPath, string.Join('|', fields.Skip(2)));
+                    var actionPayload = string.Join('|', fields.Skip(2));
+                    WriteAtomic(remoteActionPath, actionPayload);
+                    Console.WriteLine($"ACTION received from {fields[2]}: {actionPayload}");
                 }
             }
         }
@@ -209,6 +211,7 @@ using (udp)
         {
             Send(udp, peer, $"{Protocol}|ACTION|{playerName}|{action}");
             lastActionSequence = actionSequence;
+            Console.WriteLine($"ACTION sent #{actionSequence}: {action}");
         }
 
         var connected = peer != null && lastPeerPacket != 0 && now - lastPeerPacket < 5000;
