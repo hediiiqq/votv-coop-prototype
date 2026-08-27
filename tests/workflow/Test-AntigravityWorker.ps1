@@ -17,8 +17,16 @@ function Assert-True([bool]$condition, [string]$message) {
 }
 
 function Invoke-Worker([string[]]$arguments) {
-    $output = & pwsh -NoProfile -File $worker @arguments 2>&1 | Out-String
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    $ps = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { (Get-Process -Id $PID).Path }
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $ps -NoProfile -File $worker @arguments 2>&1 | Out-String
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    }
+    finally {
+        $ErrorActionPreference = $prevEAP
+    }
 }
 
 try {

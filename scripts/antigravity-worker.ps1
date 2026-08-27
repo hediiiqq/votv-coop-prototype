@@ -64,11 +64,11 @@ if ($records.Count -eq 0) { throw 'No registered Git worktrees were found.' }
 
 $selected = $null
 $selectedIndex = -1
-$selectedGitDir = @(git -C $resolvedWorktree rev-parse --absolute-git-dir 2>$null | Select-Object -First 1)
+$selectedGitDir = @(git -C $resolvedWorktree rev-parse --absolute-git-dir 2>$null)
 if ($LASTEXITCODE -ne 0 -or $selectedGitDir.Count -eq 0) { throw 'Unable to identify selected worktree metadata.' }
 for ($index = 0; $index -lt $records.Count; $index++) {
     $record = $records[$index]
-    $recordGitDir = @(git -C $record.Path rev-parse --absolute-git-dir 2>$null | Select-Object -First 1)
+    $recordGitDir = @(git -C $record.Path rev-parse --absolute-git-dir 2>$null)
     if ($LASTEXITCODE -eq 0 -and $recordGitDir.Count -gt 0 -and
         [string]::Equals($recordGitDir[0], $selectedGitDir[0], [System.StringComparison]::OrdinalIgnoreCase)) {
         $selected = $record

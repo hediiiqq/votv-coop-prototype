@@ -24,8 +24,16 @@ function New-Fixture([string]$name) {
 }
 
 function Invoke-Review([string[]]$arguments) {
-    $output = & pwsh -NoProfile -File $review @arguments 2>&1 | Out-String
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    $ps = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { (Get-Process -Id $PID).Path }
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $ps -NoProfile -File $review @arguments 2>&1 | Out-String
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
+    }
+    finally {
+        $ErrorActionPreference = $prevEAP
+    }
 }
 
 try {

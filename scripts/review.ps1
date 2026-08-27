@@ -37,8 +37,15 @@ function Find-ProjectFile([string]$Root) {
 
 function Invoke-GateCommand([string]$Command) {
     $shellPath = (Get-Process -Id $PID).Path
-    & $shellPath -NoProfile -Command $Command *> $null
-    return $LASTEXITCODE
+    $prevEAP = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $null = & $shellPath -NoProfile -Command $Command 2>&1
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $prevEAP
+    }
 }
 
 function Invoke-SecretScan([string]$Root) {
@@ -95,7 +102,14 @@ if ($DiscoveryOnly) {
 $results = [System.Collections.Generic.List[object]]::new()
 $failed = $false
 
-git -C $root diff --check *> $null
+$prevEAP = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $null = git -C $root diff --check 2>&1
+}
+finally {
+    $ErrorActionPreference = $prevEAP
+}
 if ($LASTEXITCODE -eq 0) { Add-Result $results 'GitDiffSafety' 'PASS' 'git diff --check' }
 else { Add-Result $results 'GitDiffSafety' 'FAIL' 'git diff --check'; $failed = $true }
 

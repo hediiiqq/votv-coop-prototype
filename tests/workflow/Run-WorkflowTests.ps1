@@ -44,7 +44,14 @@ function Find-Python {
     return $null
 }
 
-Invoke-Suite 'AntigravityWorker' { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Test-AntigravityWorker.ps1') }
+function Find-PowerShell {
+    $command = Get-Command 'pwsh' -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return (Get-Process -Id $PID).Path
+}
+
+$powerShell = Find-PowerShell
+Invoke-Suite 'AntigravityWorker' { & $powerShell -NoProfile -File (Join-Path $PSScriptRoot 'Test-AntigravityWorker.ps1') }
 
 $python = Find-Python
 if ($null -eq $python) {
@@ -54,7 +61,7 @@ else {
     Invoke-Suite 'Research' { & $python -m unittest (Join-Path $PSScriptRoot 'test_research.py') -v }
 }
 
-Invoke-Suite 'Review' { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Test-Review.ps1') }
+Invoke-Suite 'Review' { & $powerShell -NoProfile -File (Join-Path $PSScriptRoot 'Test-Review.ps1') }
 
 $results | Format-Table -AutoSize
 if ($failed) { exit 1 }
