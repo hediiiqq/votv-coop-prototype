@@ -1,6 +1,35 @@
 $ErrorActionPreference = 'Stop'
 $configPath = Join-Path $PSScriptRoot 'VotV\Binaries\Win64\Mods\VotVCoopPrototype\config.ini'
 
+$sourceCandidates = @(
+    $env:VOTV_COOP_MOD_PATH,
+    $env:VOTV_MOD_PATH,
+    (Join-Path $PSScriptRoot '..\votv-coop-prototype\mod'),
+    (Join-Path $PSScriptRoot '..\mod'),
+    (Join-Path $PSScriptRoot '..\..\mod'),
+    (Join-Path $PSScriptRoot 'mod')
+) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+$sourceMod = $null
+foreach ($candidate in $sourceCandidates) {
+    if (Test-Path -LiteralPath (Join-Path $candidate 'scripts') -PathType Container) {
+        $sourceMod = (Resolve-Path -LiteralPath $candidate).Path
+        break
+    }
+}
+
+if ($sourceMod) {
+    $targetMod = Join-Path $PSScriptRoot 'VotV\Binaries\Win64\Mods\VotVCoopPrototype'
+    $targetScripts = Join-Path $targetMod 'scripts'
+    if (-not (Test-Path -LiteralPath $targetScripts -PathType Container)) {
+        New-Item -ItemType Directory -Path $targetScripts -Force | Out-Null
+    }
+    Copy-Item -Path (Join-Path $sourceMod 'scripts\*.lua') -Destination $targetScripts -Force
+    if (Test-Path -LiteralPath (Join-Path $sourceMod 'enabled.txt')) {
+        Copy-Item -Path (Join-Path $sourceMod 'enabled.txt') -Destination $targetMod -Force
+    }
+}
+
 if (-not (Test-Path -LiteralPath $configPath)) {
     Write-Host 'Mod files not found. Extract the entire archive next to VotV.exe.' -ForegroundColor Red
     exit 1

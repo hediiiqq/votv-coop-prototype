@@ -35,6 +35,40 @@ foreach ($root in @($ServerRoot, $ClientRoot)) {
     Assert-Equal ($result | Select-Object -Last 1) '-windowed -ResX=960 -ResY=540' 'Windowed arguments are incorrect'
 }
 
+$repoScriptsDir = Join-Path $PSScriptRoot '..\mod\scripts'
+if (-not (Test-Path -LiteralPath $repoScriptsDir -PathType Container)) {
+    throw "Repository mod scripts directory is missing: $repoScriptsDir"
+}
+$repoScripts = @(Get-ChildItem -LiteralPath $repoScriptsDir -Filter '*.lua' -File)
+if ($repoScripts.Count -eq 0) {
+    throw "No Lua script files found in repository: $repoScriptsDir"
+}
+
+foreach ($root in @($ServerRoot, $ClientRoot)) {
+    $targetScriptsDir = Join-Path $root 'VotV\Binaries\Win64\Mods\VotVCoopPrototype\scripts'
+    if (-not (Test-Path -LiteralPath $targetScriptsDir -PathType Container)) {
+        throw "Installed mod scripts directory is missing: $targetScriptsDir"
+    }
+    foreach ($script in $repoScripts) {
+        $installedFile = Join-Path $targetScriptsDir $script.Name
+        if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) {
+            throw "Installed copy is missing script '$($script.Name)': $installedFile"
+        }
+        $expectedHash = (Get-FileHash -LiteralPath $script.FullName -Algorithm SHA256).Hash
+        $actualHash = (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash
+        if ($actualHash -ne $expectedHash) {
+            throw "Script hash mismatch for '$($script.Name)' in '$root'. Expected $expectedHash, got $actualHash."
+        }
+    }
+    $installedScripts = @(Get-ChildItem -LiteralPath $targetScriptsDir -Filter '*.lua' -File)
+    foreach ($installedScript in $installedScripts) {
+        $repoFile = Join-Path $repoScriptsDir $installedScript.Name
+        if (-not (Test-Path -LiteralPath $repoFile -PathType Leaf)) {
+            throw "Installed copy in '$root' contains unexpected or stale script '$($installedScript.Name)' not found in repository mod/scripts: $($installedScript.FullName)"
+        }
+    }
+}
+
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('VotVCoopTest-' + [guid]::NewGuid().ToString('N'))
 $serverRuntime = Join-Path $testRoot 'server'
 $clientRuntime = Join-Path $testRoot 'client'
