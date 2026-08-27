@@ -127,8 +127,19 @@ $getIdEnd = $worldSrc.IndexOf("`nlocal function ", $getIdStart + 1)
 if ($getIdEnd -lt 0) { $getIdEnd = $worldSrc.Length }
 $getIdBlock = $worldSrc.Substring($getIdStart, $getIdEnd - $getIdStart)
 
-Assert-True ($getIdBlock -match 'powerControl') 'get_object_identifier must specifically inspect powerControl'
-Assert-True ($getIdBlock -match 'safe_full_name|GetFullName') 'get_object_identifier must use full actor path for powerControl'
+# The power panel Key is generated per save, so it must be addressed by actor
+# path. That rule now lives in the kind descriptor, so assert it there.
+$powerKindStart = $worldSrc.IndexOf('name = "powerControl"')
+Assert-True ($powerKindStart -ge 0) 'a powerControl kind descriptor must exist'
+$powerKindLen = [Math]::Min(600, $worldSrc.Length - $powerKindStart)
+$powerKindBlock = $worldSrc.Substring($powerKindStart, $powerKindLen)
+Assert-True ($powerKindBlock -match 'identify_by_path\s*=\s*true') 'powerControl kind must be identified by actor path, not by Key'
+$doorKindStart = $worldSrc.IndexOf('name = "door"')
+Assert-True ($doorKindStart -ge 0) 'a door kind descriptor must exist'
+$doorKindLen = [Math]::Min(600, $worldSrc.Length - $doorKindStart)
+Assert-True ($worldSrc.Substring($doorKindStart, $doorKindLen) -notmatch 'identify_by_path') 'doors must keep using their map Key, not the actor path'
+Assert-True ($getIdBlock -match 'identify_by_path') 'get_object_identifier must honour identify_by_path'
+Assert-True ($getIdBlock -match 'safe_full_name|GetFullName') 'get_object_identifier must use full actor path for path-identified kinds'
 Assert-True ($getIdBlock -match 'actor\.Key') 'get_object_identifier must inspect Key for standard triggerBase actors'
 
 # -------------------------------------------------------------
@@ -172,9 +183,10 @@ Assert-True ($findObjBlock -match 'Object not found for id') 'find_object_by_id 
 # -------------------------------------------------------------
 # 7. Redundant state prevention (no redundant animations)
 # -------------------------------------------------------------
-Assert-True ($applyStateBlock -match 'current_opened\s*==\s*target_opened') 'apply_object_state must skip door if already in target state'
-Assert-True ($applyStateBlock -match 'current_a\s*==\s*target_a') 'apply_object_state must skip switch if already in target state'
-Assert-True ($applyStateBlock -match 'tgt_calc\s*==\s*cur_calc') 'apply_object_state must skip powerControl if all levers match target state'
+# One generic guard now covers every kind: compare each declared property
+# against the target and bail out when nothing differs.
+Assert-True ($applyStateBlock -match 'target\[prop\.key\]\s*~=\s*current\[prop\.key\]') 'apply_object_state must compare every declared property against current state'
+Assert-True ($applyStateBlock -match 'if not differs then return false end') 'apply_object_state must skip the apply when the object already holds the target state'
 
 # -------------------------------------------------------------
 # 8. Game thread & crash safety

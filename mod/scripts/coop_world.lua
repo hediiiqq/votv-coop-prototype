@@ -94,13 +94,102 @@ local function parse_remote_journal_line(line)
     }
 end
 
-local function get_object_identifier(actor)
-    if not actor then return nil end
-    local valid = false
-    pcall(function() valid = actor:IsValid() end)
-    if not valid then return nil end
+-- ---------------------------------------------------------------------------
+-- Object kinds
+--
+-- Every VotV interactable we sync is described once, here. Adding a new kind
+-- means adding a row below: identification, the boolean properties that make
+-- up its state, and how to commit that state to the game. The rest of this
+-- module stays generic.
+--
+-- `props` order defines the wire format, so it must not be reordered once a
+-- kind ships: the payload is "name=value,name=value".
+-- ---------------------------------------------------------------------------
 
-    local full_name = safe_full_name(actor)
+local function read_prop(actor, names)
+    for _, name in ipairs(names) do
+        local value = nil
+        local ok = pcall(function() value = actor[name] end)
+        if ok and value ~= nil then
+            return value and true or false, true
+        end
+    end
+    return false, false
+end
+
+local function write_prop(actor, names, value)
+    for _, name in ipairs(names) do
+        local present = nil
+        pcall(function() present = actor[name] end)
+        if present ~= nil then
+            local ok = pcall(function() actor[name] = value end)
+            if ok then return true end
+        end
+    end
+    return false
+end
+
+local KINDS = {
+    {
+        name = "door",
+        class_hint = "door_C",
+        probe = "isOpened",
+        props = {
+            { key = "isOpened", names = { "isOpened" } },
+        },
+        commit = function(actor, target)
+            if target.isOpened then
+                if actor.doorOpen then actor:doorOpen(true) end
+            else
+                if actor.doorClose then actor:doorClose(true) end
+            end
+        end,
+    },
+    {
+        name = "lightswitch",
+        class_hint = "lightswitch_C",
+        probe = "A",
+        props = {
+            { key = "A", names = { "A" } },
+        },
+        commit = function(actor)
+            if actor.runTrigger then
+                actor:runTrigger()
+            elseif actor.player_use then
+                actor:player_use()
+            end
+        end,
+    },
+    {
+        name = "powerControl",
+        class_hint = "powerControl_C",
+        probe = "press_calc",
+        -- The Key of a power panel is generated per save (e.g. UrCgZUozHxXzTc5Ky5a9ZQ)
+        -- and differs between players, so it is addressed by actor path instead.
+        identify_by_path = true,
+        props = {
+            { key = "press_calc",  names = { "press_calc" },                aliases = { "calc" } },
+            { key = "press_coord", names = { "press_coord", "press_coords" }, aliases = { "coord" } },
+            { key = "press_downl", names = { "press_downl" },               aliases = { "downl" } },
+            { key = "press_play",  names = { "press_play" },                aliases = { "play" } },
+            { key = "press_light", names = { "press_light" },               aliases = { "light" } },
+        },
+        commit = function(actor, target)
+            if actor.powerChanged then
+                actor:powerChanged(target.press_calc, target.press_downl,
+                    target.press_coord, target.press_play, target.press_light)
+            end
+            if actor.moveLevers then actor:moveLevers() end
+        end,
+    },
+    {
+        name = "trigger",
+        class_hint = "triggerBase_C",
+        props = {},
+    },
+}
+
+local function class_name_of(actor)
     local class_name = "<unknown>"
     pcall(function()
         local c = actor:GetClass()
@@ -108,14 +197,46 @@ local function get_object_identifier(actor)
             class_name = safe_full_name(c)
         end
     end)
+    return class_name
+end
 
-    -- powerControl_C: Key is randomly generated (e.g. UrCgZUozHxXzTc5Ky5a9ZQ) and does not match between players.
-    -- Use the full actor path as canonical identifier for powerControl.
-    if class_name:find("powerControl") or full_name:find("powerControl") then
+-- Returns the descriptor for this actor, or nil when we do not sync it.
+local function kind_of(actor)
+    if not actor then return nil end
+    local class_name = class_name_of(actor)
+    local full_name = safe_full_name(actor)
+    for _, kind in ipairs(KINDS) do
+        if class_name:find(kind.class_hint, 1, true) or full_name:find(kind.class_hint, 1, true) then
+            return kind
+        end
+        if kind.probe then
+            local present = nil
+            pcall(function() present = actor[kind.probe] end)
+            if present ~= nil then return kind end
+        end
+    end
+    return nil
+end
+
+local function get_object_type(actor)
+    local kind = kind_of(actor)
+    return kind and kind.name or "unknown"
+end
+
+-- The id both players agree on. Doors and switches carry a stable map key;
+-- anything without one falls back to its actor path.
+local function get_object_identifier(actor)
+    if not actor then return nil end
+    local valid = false
+    pcall(function() valid = actor:IsValid() end)
+    if not valid then return nil end
+
+    local full_name = safe_full_name(actor)
+    local kind = kind_of(actor)
+    if kind and kind.identify_by_path then
         return full_name
     end
 
-    -- For door_C, lightswitch_C, and other triggerBase_C objects, use Key from triggerBase_C if present and valid.
     local key = nil
     pcall(function()
         local k = actor.Key
@@ -132,7 +253,6 @@ local function get_object_identifier(actor)
         return key
     end
 
-    -- Fallback to full actor path if Key is empty or absent
     return full_name
 end
 
@@ -192,180 +312,94 @@ local function find_object_by_id(object_id)
     return nil
 end
 
-local function get_object_type(actor)
-    if not actor then return "unknown" end
-    local class_name = "<unknown>"
-    local full_name = safe_full_name(actor)
-    pcall(function()
-        local c = actor:GetClass()
-        if c and c:IsValid() then
-            class_name = safe_full_name(c)
+-- ---------------------------------------------------------------------------
+-- State serialization
+-- ---------------------------------------------------------------------------
+
+local function bool_word(value)
+    return value and "true" or "false"
+end
+
+-- Reads a boolean out of a payload, trying the property name and its aliases.
+-- Returns `fallback` when the payload says nothing about this property.
+local function parse_bool(payload, prop, fallback)
+    local names = { prop.key }
+    for _, alias in ipairs(prop.aliases or {}) do names[#names + 1] = alias end
+    for _, extra in ipairs(prop.names or {}) do names[#names + 1] = extra end
+
+    for _, name in ipairs(names) do
+        local lower = name:lower()
+        if payload:find(lower .. "=true", 1, true) or payload:find(lower .. "=1", 1, true) then
+            return true
         end
-    end)
-    if class_name:find("door_C") or full_name:find("door_C") or actor.isOpened ~= nil then
-        return "door"
-    elseif class_name:find("lightswitch_C") or full_name:find("lightswitch_C") or actor.A ~= nil then
-        return "lightswitch"
-    elseif class_name:find("powerControl_C") or full_name:find("powerControl_C") or actor.press_calc ~= nil then
-        return "powerControl"
-    elseif class_name:find("triggerBase_C") or full_name:find("triggerBase_C") then
-        return "trigger"
+        if payload:find(lower .. "=false", 1, true) or payload:find(lower .. "=0", 1, true) then
+            return false
+        end
     end
-    return "unknown"
+    return fallback
+end
+
+local function read_state_values(actor, kind)
+    local values = {}
+    for _, prop in ipairs(kind.props) do
+        values[prop.key] = (read_prop(actor, prop.names))
+    end
+    return values
 end
 
 local function extract_object_state(actor)
     if not actor then return nil end
-    local obj_type = get_object_type(actor)
-    if obj_type == "door" then
-        local is_opened = actor.isOpened and true or false
-        return string.format("isOpened=%s", is_opened and "true" or "false")
-    elseif obj_type == "lightswitch" then
-        local a = actor.A and true or false
-        return string.format("A=%s", a and "true" or "false")
-    elseif obj_type == "powerControl" then
-        local calc = actor.press_calc and true or false
-        local coord = (actor.press_coord or actor.press_coords) and true or false
-        local downl = actor.press_downl and true or false
-        local play = actor.press_play and true or false
-        local light = actor.press_light and true or false
-        return string.format("press_calc=%s,press_coord=%s,press_downl=%s,press_play=%s,press_light=%s",
-            calc and "true" or "false", coord and "true" or "false", downl and "true" or "false",
-            play and "true" or "false", light and "true" or "false")
+    local kind = kind_of(actor)
+    if not kind then return nil end
+    if #kind.props == 0 then return "active=true" end
+
+    local values = read_state_values(actor, kind)
+    local parts = {}
+    for _, prop in ipairs(kind.props) do
+        parts[#parts + 1] = string.format("%s=%s", prop.key, bool_word(values[prop.key]))
     end
-    return "active=true"
+    return table.concat(parts, ",")
 end
 
+-- Applies a remote payload. Returns true only when something actually changed:
+-- re-applying a state the object already holds would replay its animation.
 local function apply_object_state(actor, payload)
     if not actor or not payload then return false end
     local valid = false
     pcall(function() valid = actor:IsValid() end)
     if not valid then return false end
 
-    local obj_type = get_object_type(actor)
+    local kind = kind_of(actor)
+    if not kind or #kind.props == 0 then return false end
 
-    if obj_type == "door" then
-        local lower = payload:lower()
-        local target_opened = nil
-        if lower:find("isopened=true") or lower:find("open=true") or lower:find("opened=true") or lower == "true" or lower == "1" then
-            target_opened = true
-        elseif lower:find("isopened=false") or lower:find("open=false") or lower:find("opened=false") or lower == "false" or lower == "0" then
-            target_opened = false
-        end
-
-        if target_opened == nil then return false end
-        local current_opened = actor.isOpened and true or false
-        if current_opened == target_opened then
-            -- Object is already in target state; skip to avoid redundant animations
-            return false
-        end
-
-        is_applying_remote = true
-        local ok, err = pcall(function()
-            if target_opened then
-                if actor.doorOpen then
-                    actor:doorOpen(true)
-                end
-            else
-                if actor.doorClose then
-                    actor:doorClose(true)
-                end
-            end
-            actor.isOpened = target_opened
-        end)
-        is_applying_remote = false
-        if not ok then
-            print(string.format("%s[World] Failed to apply door state: %s\n", MOD, tostring(err)))
-            return false
-        end
-        return true
-
-    elseif obj_type == "lightswitch" then
-        local lower = payload:lower()
-        local target_a = nil
-        if lower:find("a=true") or lower == "true" or lower == "1" then
-            target_a = true
-        elseif lower:find("a=false") or lower == "false" or lower == "0" then
-            target_a = false
-        end
-
-        if target_a == nil then return false end
-        local current_a = actor.A and true or false
-        if current_a == target_a then
-            -- Object is already in target state
-            return false
-        end
-
-        is_applying_remote = true
-        local ok, err = pcall(function()
-            actor.A = target_a
-            if actor.runTrigger then
-                actor:runTrigger()
-            elseif actor.player_use then
-                actor:player_use()
-            end
-        end)
-        is_applying_remote = false
-        if not ok then
-            print(string.format("%s[World] Failed to apply lightswitch state: %s\n", MOD, tostring(err)))
-            return false
-        end
-        return true
-
-    elseif obj_type == "powerControl" then
-        local lower = payload:lower()
-        local cur_calc = actor.press_calc and true or false
-        local cur_coord = (actor.press_coord or actor.press_coords) and true or false
-        local cur_downl = actor.press_downl and true or false
-        local cur_play = actor.press_play and true or false
-        local cur_light = actor.press_light and true or false
-
-        local function parse_bool(key, fallback)
-            if lower:find(key .. "=true") or lower:find(key .. "=1") then
-                return true
-            elseif lower:find(key .. "=false") or lower:find(key .. "=0") then
-                return false
-            end
-            return fallback
-        end
-
-        local tgt_calc = parse_bool("press_calc", parse_bool("calc", cur_calc))
-        local tgt_coord = parse_bool("press_coord", parse_bool("press_coords", parse_bool("coord", cur_coord)))
-        local tgt_downl = parse_bool("press_downl", parse_bool("downl", cur_downl))
-        local tgt_play = parse_bool("press_play", parse_bool("play", cur_play))
-        local tgt_light = parse_bool("press_light", parse_bool("light", cur_light))
-
-        if tgt_calc == cur_calc and tgt_coord == cur_coord and tgt_downl == cur_downl
-            and tgt_play == cur_play and tgt_light == cur_light then
-            -- Object is already in target state
-            return false
-        end
-
-        is_applying_remote = true
-        local ok, err = pcall(function()
-            actor.press_calc = tgt_calc
-            actor.press_coord = tgt_coord
-            actor.press_downl = tgt_downl
-            actor.press_play = tgt_play
-            actor.press_light = tgt_light
-            if actor.powerChanged then
-                actor:powerChanged(tgt_calc, tgt_downl, tgt_coord, tgt_play, tgt_light)
-            end
-            if actor.moveLevers then
-                actor:moveLevers()
-            end
-        end)
-        is_applying_remote = false
-        if not ok then
-            print(string.format("%s[World] Failed to apply powerControl state: %s\n", MOD, tostring(err)))
-            return false
-        end
-        return true
+    local lower = payload:lower()
+    local current = read_state_values(actor, kind)
+    local target = {}
+    local differs = false
+    for _, prop in ipairs(kind.props) do
+        target[prop.key] = parse_bool(lower, prop, current[prop.key])
+        if target[prop.key] ~= current[prop.key] then differs = true end
     end
 
-    return false
-end
+    if not differs then return false end
 
+    -- Suppress our own hooks while we write, or the applied change would be
+    -- reported straight back to the sender as a fresh local change.
+    is_applying_remote = true
+    local ok, err = pcall(function()
+        for _, prop in ipairs(kind.props) do
+            write_prop(actor, prop.names, target[prop.key])
+        end
+        if kind.commit then kind.commit(actor, target) end
+    end)
+    is_applying_remote = false
+
+    if not ok then
+        print(string.format("%s[World] Failed to apply %s state: %s\n", MOD, kind.name, tostring(err)))
+        return false
+    end
+    return true
+end
 local function apply_interact_request(actor, action_payload)
     if not actor then return false end
     local valid = false
