@@ -223,4 +223,69 @@ Assert-True ($registerHooksBlock -match 'Hook registration failed') 'register_ho
 Assert-True ($worldSrc -match 'poll_interval_with_hooks' -or $worldSrc -match 'poll_interval') 'coop_world must configure polling interval'
 Assert-True ($tickBlock -match 'last_poll_time' -or $tickBlock -match 'interval') 'tick must throttle polling rather than unconditionally polling all objects every frame'
 
-Write-Host "PASS: Lua world sync (coop_world.lua) structure, echo protection, multi-line journal, role authority, canonical deduplication, real /Game/ hook paths, and polling throttling checks."
+# -------------------------------------------------------------
+# 11. Deferred Hook Registration (NOT one-time at startup)
+# -------------------------------------------------------------
+$isLevelReadyStart = $worldSrc.IndexOf('local function is_level_ready(')
+Assert-True ($isLevelReadyStart -ge 0) 'is_level_ready helper function must exist'
+$isLevelReadyEnd = $worldSrc.IndexOf("`nlocal function ", $isLevelReadyStart + 1)
+if ($isLevelReadyEnd -lt 0) { $isLevelReadyEnd = $worldSrc.Length }
+$isLevelReadyBlock = $worldSrc.Substring($isLevelReadyStart, $isLevelReadyEnd - $isLevelReadyStart)
+
+Assert-True ($isLevelReadyBlock -match 'GetPlayerController') 'is_level_ready must inspect PlayerController'
+Assert-True ($isLevelReadyBlock -match 'Pawn') 'is_level_ready must inspect Player Pawn'
+
+$checkHooksStart = $worldSrc.IndexOf('local function check_and_register_hooks(')
+Assert-True ($checkHooksStart -ge 0) 'check_and_register_hooks helper function must exist'
+$checkHooksEnd = $worldSrc.IndexOf("`nlocal function ", $checkHooksStart + 1)
+if ($checkHooksEnd -lt 0) { $checkHooksEnd = $worldSrc.Length }
+$checkHooksBlock = $worldSrc.Substring($checkHooksStart, $checkHooksEnd - $checkHooksStart)
+
+Assert-True ($checkHooksBlock -match 'hooks_installed') 'check_and_register_hooks must check if hooks are already installed'
+Assert-True ($checkHooksBlock -match 'is_level_ready') 'check_and_register_hooks must verify level readiness before attempting registration'
+Assert-True ($checkHooksBlock -match 'register_hooks\(\)') 'check_and_register_hooks must invoke register_hooks'
+
+# tick must invoke deferred hook registration check
+Assert-True ($tickBlock -match 'check_and_register_hooks\(\)|register_hooks\(\)') 'tick must dynamically attempt deferred hook registration rather than relying on one-time init'
+
+# Successful registration must explicitly log the count of registered hooks
+Assert-True ($registerHooksBlock -match 'Registered\s+%d\s+hooks\s+successfully|Registered\s+.*?\s+hooks\s+successfully') 'register_hooks must explicitly log registered hook count'
+
+# -------------------------------------------------------------
+# 12. World Dynamic Rescan and Level Transition Cache Reset (NOT one-time)
+# -------------------------------------------------------------
+$resetCacheStart = $worldSrc.IndexOf('local function reset_world_cache(')
+Assert-True ($resetCacheStart -ge 0) 'reset_world_cache helper function must exist'
+$resetCacheEnd = $worldSrc.IndexOf("`nlocal function ", $resetCacheStart + 1)
+if ($resetCacheEnd -lt 0) { $resetCacheEnd = $worldSrc.Length }
+$resetCacheBlock = $worldSrc.Substring($resetCacheStart, $resetCacheEnd - $resetCacheStart)
+
+Assert-True ($resetCacheBlock -match 'canonical_objects\[k\]\s*=\s*nil|canonical_objects\s*=\s*\{\}') 'reset_world_cache must clear canonical_objects'
+Assert-True ($resetCacheBlock -match 'object_cache\[k\]\s*=\s*nil|object_cache\s*=\s*\{\}') 'reset_world_cache must clear object_cache'
+Assert-True ($resetCacheBlock -match 'last_known_states\[k\]\s*=\s*nil|last_known_states\s*=\s*\{\}') 'reset_world_cache must clear last_known_states'
+Assert-True ($resetCacheBlock -match 'World cache reset') 'reset_world_cache must log cache reset event'
+
+$checkRescanStart = $worldSrc.IndexOf('local function check_world_readiness_and_rescan(')
+Assert-True ($checkRescanStart -ge 0) 'check_world_readiness_and_rescan helper function must exist'
+$checkRescanEnd = $worldSrc.IndexOf("`nlocal function ", $checkRescanStart + 1)
+if ($checkRescanEnd -lt 0) { $checkRescanEnd = $worldSrc.Length }
+$checkRescanBlock = $worldSrc.Substring($checkRescanStart, $checkRescanEnd - $checkRescanStart)
+
+Assert-True ($checkRescanBlock -match 'is_level_ready') 'check_world_readiness_and_rescan must verify level readiness'
+Assert-True ($checkRescanBlock -match 'reset_world_cache') 'check_world_readiness_and_rescan must reset cache on level transition or invalid actors'
+Assert-True ($checkRescanBlock -match 'scan_and_cache_world_objects') 'check_world_readiness_and_rescan must trigger world rescan'
+
+# tick must invoke dynamic world rescan check
+Assert-True ($tickBlock -match 'check_world_readiness_and_rescan\(\)|scan_and_cache_world_objects\(\)') 'tick must dynamically rescan world objects rather than relying on one-time init'
+
+# scan_and_cache_world_objects must log canonical object count
+Assert-True ($scanCacheBlock -match 'World scanned:\s+%d\s+canonical\s+objects\s+found|Scanned world:\s+%d\s+canonical\s+objects\s+found') 'scan_and_cache_world_objects must log canonical object count'
+
+# -------------------------------------------------------------
+# 13. Client interaction interception and safe hook unwrapping
+# -------------------------------------------------------------
+Assert-True ($onHookBlock -match 'actor\.get') 'on_hook_triggered must safely unwrap UE4SS hook context object'
+Assert-True ($onHookBlock -match 'role\s*==\s*"client"') 'on_hook_triggered must handle client role'
+Assert-True ($onHookBlock -match 'emit_local_interact\(') 'on_hook_triggered must emit local interact on client'
+
+Write-Host "PASS: Lua world sync (coop_world.lua) deferred hook registration, dynamic rescan, cache reset, echo protection, multi-line journal, role authority, canonical deduplication, real /Game/ hook paths, and polling throttling checks."

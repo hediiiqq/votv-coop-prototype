@@ -51,10 +51,24 @@ local last_poll_time = 0
 local poll_interval_with_hooks = 0.5
 local poll_interval_fallback = 0.1
 local hooks_installed = false
+local last_hook_attempt_time = 0
+local hook_retry_interval = 2.0
+local has_logged_hook_failures = false
+local last_hook_failure_summary_time = 0
+local hook_failure_summary_interval = 30.0
 
--- Cache scan throttling to avoid scanning the world every tick
+-- Client hook failure warning tracking
+local level_loaded_time = 0
+local client_hook_warn_timeout = 30.0
+local last_client_hook_warn_time = 0
+local client_hook_warn_interval = 30.0
+
+-- Cache scan throttling and periodic rescan
 local last_cache_scan_time = 0
 local cache_scan_interval = 1.0
+local periodic_rescan_interval = 5.0
+local last_world_identity = nil
+local last_scanned_count = -1
 
 local function read_all_lines(path)
     if not path then return {} end
@@ -256,8 +270,43 @@ local function get_object_identifier(actor)
     return full_name
 end
 
+local function count_canonical_objects()
+    local count = 0
+    for _ in pairs(canonical_objects) do
+        count = count + 1
+    end
+    return count
+end
+
+local function is_level_ready()
+    if not UEHelpers then return false end
+    local controller = nil
+    local ctrl_ok = pcall(function() controller = UEHelpers:GetPlayerController() end)
+    if not ctrl_ok or not controller or not controller:IsValid() then return false end
+    local pawn = nil
+    local pawn_ok = pcall(function() pawn = controller.Pawn end)
+    if not pawn_ok or not pawn or not pawn:IsValid() then return false end
+    return true
+end
+
+local function reset_world_cache(reason)
+    for k in pairs(canonical_objects) do canonical_objects[k] = nil end
+    for k in pairs(object_cache) do object_cache[k] = nil end
+    for k in pairs(last_known_states) do last_known_states[k] = nil end
+    for k in pairs(object_latest_world_seq) do object_latest_world_seq[k] = nil end
+    for k in pairs(processed_interact_seqs) do processed_interact_seqs[k] = nil end
+    last_scanned_count = -1
+    level_loaded_time = 0
+    has_logged_hook_failures = false
+    print(string.format("%s[World] World cache reset (%s)\n", MOD, tostring(reason or "unknown")))
+end
+
 local function scan_and_cache_world_objects()
     last_cache_scan_time = os.clock()
+    if not is_level_ready() then
+        return 0
+    end
+
     local classes_to_find = { "door_C", "lightswitch_C", "powerControl_C", "triggerBase_C" }
     for _, cname in ipairs(classes_to_find) do
         pcall(function()
@@ -279,6 +328,13 @@ local function scan_and_cache_world_objects()
             end
         end)
     end
+
+    local total_canonical = count_canonical_objects()
+    if total_canonical ~= last_scanned_count then
+        last_scanned_count = total_canonical
+        print(string.format("%s[World] World scanned: %d canonical objects found\n", MOD, total_canonical))
+    end
+    return total_canonical
 end
 
 local function find_object_by_id(object_id)
@@ -563,7 +619,16 @@ end
 local function on_hook_triggered(context, hook_name)
     if is_applying_remote then return end
     local actor = context
-    if not actor or not actor:IsValid() then return end
+    if not actor then return end
+    pcall(function()
+        if actor.get then
+            local unwrap = actor:get()
+            if unwrap and unwrap:IsValid() then actor = unwrap end
+        end
+    end)
+    local valid = false
+    pcall(function() valid = actor:IsValid() end)
+    if not valid then return end
 
     local obj_id = get_object_identifier(actor)
     if not obj_id or obj_id == "" then return end
@@ -581,9 +646,14 @@ end
 
 local function register_hooks()
     if type(RegisterHook) ~= "function" then
-        print(string.format("%s[World] RegisterHook not available; using polling fallback\n", MOD))
+        local now = os.clock()
+        if not has_logged_hook_failures or (now - last_hook_failure_summary_time >= hook_failure_summary_interval) then
+            has_logged_hook_failures = true
+            last_hook_failure_summary_time = now
+            print(string.format("%s[World] RegisterHook not available; using polling fallback\n", MOD))
+        end
         hooks_installed = false
-        return
+        return false
     end
 
     local hook_targets = {
@@ -610,6 +680,7 @@ local function register_hooks()
     }
 
     local registered_count = 0
+    local should_log_details = not has_logged_hook_failures
     for _, target in ipairs(hook_targets) do
         local ok, hook_res = pcall(function()
             return RegisterHook(target, function(context, ...)
@@ -622,8 +693,10 @@ local function register_hooks()
             registered_count = registered_count + 1
             print(string.format("%s[World] Hook registration succeeded: %s (id: %s)\n", MOD, target, tostring(hook_res)))
         else
-            local err_msg = ok and "returned nil/false" or tostring(hook_res)
-            print(string.format("%s[World] Hook registration failed: %s (%s)\n", MOD, target, err_msg))
+            if should_log_details then
+                local err_msg = ok and "returned nil/false" or tostring(hook_res)
+                print(string.format("%s[World] Hook registration failed: %s (%s)\n", MOD, target, err_msg))
+            end
         end
     end
 
@@ -631,15 +704,110 @@ local function register_hooks()
         hooks_installed = true
         print(string.format("%s[World] Registered %d hooks successfully; event-driven mode active (polling fallback interval: %.1fs)\n",
             MOD, registered_count, poll_interval_with_hooks))
+        return true
     else
         hooks_installed = false
-        print(string.format("%s[World] No hooks registered; polling fallback active (interval: %.1fs)\n",
-            MOD, poll_interval_fallback))
+        local now = os.clock()
+        if not has_logged_hook_failures then
+            has_logged_hook_failures = true
+            last_hook_failure_summary_time = now
+            print(string.format("%s[World] No hooks registered; polling fallback active (interval: %.1fs)\n",
+                MOD, poll_interval_fallback))
+        else
+            if now - last_hook_failure_summary_time >= hook_failure_summary_interval then
+                last_hook_failure_summary_time = now
+                print(string.format("%s[World] Hook registration retry failed (0 hooks registered); polling fallback active (interval: %.1fs)\n",
+                    MOD, poll_interval_fallback))
+            end
+        end
+        return false
+    end
+end
+
+local function check_and_register_hooks()
+    if hooks_installed then return true end
+    local now = os.clock()
+    if now - last_hook_attempt_time < hook_retry_interval then return false end
+    last_hook_attempt_time = now
+
+    if not is_level_ready() then return false end
+
+    return register_hooks()
+end
+
+local function check_world_readiness_and_rescan()
+    if not is_level_ready() then return end
+
+    local controller = nil
+    pcall(function() controller = UEHelpers:GetPlayerController() end)
+    local pawn = controller and controller.Pawn
+    local world = nil
+    pcall(function() if pawn and pawn:IsValid() then world = pawn:GetWorld() end end)
+    local world_identity = safe_object_identity(world)
+
+    if last_world_identity ~= nil and world_identity ~= nil and last_world_identity ~= world_identity then
+        reset_world_cache("level transition detected")
+        last_world_identity = world_identity
+        scan_and_cache_world_objects()
+        return
+    end
+    last_world_identity = world_identity
+
+    local count = count_canonical_objects()
+    local now = os.clock()
+    if count == 0 then
+        if now - last_cache_scan_time >= cache_scan_interval then
+            scan_and_cache_world_objects()
+        end
+    else
+        if now - last_cache_scan_time >= periodic_rescan_interval then
+            -- Verify at least one existing object is valid
+            local has_invalid = false
+            for _, actor in pairs(canonical_objects) do
+                local valid = false
+                pcall(function() valid = actor:IsValid() end)
+                if not valid then
+                    has_invalid = true
+                    break
+                end
+            end
+            if has_invalid then
+                reset_world_cache("invalid actors detected during periodic check")
+            end
+            scan_and_cache_world_objects()
+        end
+    end
+end
+
+local function check_client_hook_warning()
+    if role ~= "client" or hooks_installed then return end
+    if not is_level_ready() then
+        level_loaded_time = 0
+        return
+    end
+
+    local now = os.clock()
+    if level_loaded_time == 0 then
+        level_loaded_time = now
+        return
+    end
+
+    local elapsed = now - level_loaded_time
+    if elapsed >= client_hook_warn_timeout then
+        if now - last_client_hook_warn_time >= client_hook_warn_interval then
+            last_client_hook_warn_time = now
+            print(string.format("%s[World] WARNING: Client hooks not registered after %.0fs on loaded level! World interactions (doors, switches) will NOT work because UE4SS hooks failed to attach.\n",
+                MOD, elapsed))
+        end
     end
 end
 
 local function tick()
     local ok, err = pcall(function()
+        -- Deferred hook registration and world rescan once level is loaded
+        check_and_register_hooks()
+        check_world_readiness_and_rescan()
+
         if role == "host" then
             consume_remote_interacts()
             local now = os.clock()
@@ -650,6 +818,7 @@ local function tick()
             end
         elseif role == "client" then
             consume_remote_world_state()
+            check_client_hook_warning()
         end
     end)
     if not ok then
@@ -680,11 +849,14 @@ local function init(deps)
         read_all_lines_fn = util.read_all_lines
     end
 
-    -- Initial scan of world objects
-    pcall(scan_and_cache_world_objects)
-
-    -- Register UE4SS hooks with explicit status logging and polling fallback
-    register_hooks()
+    -- Initial scan of world objects and hook registration if level is already loaded
+    if is_level_ready() then
+        level_loaded_time = os.clock()
+        register_hooks()
+        scan_and_cache_world_objects()
+    else
+        print(string.format("%s[World] Level not loaded yet; deferring hook registration and world scan\n", MOD))
+    end
 
     print(string.format("%s[World] Initialized as %s\n", MOD, role))
 end
@@ -709,7 +881,12 @@ coop_world.poll_host_world_state = poll_host_world_state
 coop_world.read_all_lines = read_all_lines
 coop_world.parse_remote_journal_line = parse_remote_journal_line
 coop_world.register_hooks = register_hooks
+coop_world.check_and_register_hooks = check_and_register_hooks
 coop_world.scan_and_cache_world_objects = scan_and_cache_world_objects
+coop_world.check_world_readiness_and_rescan = check_world_readiness_and_rescan
+coop_world.reset_world_cache = reset_world_cache
+coop_world.is_level_ready = is_level_ready
+coop_world.count_canonical_objects = count_canonical_objects
 coop_world.canonical_objects = canonical_objects
 coop_world.object_cache = object_cache
 
