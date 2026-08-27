@@ -37,9 +37,15 @@ end
 
 local function emit_local_action(action_name)
     local controller = UEHelpers:GetPlayerController()
-    if not controller or not controller:IsValid() then return end
+    if not controller or not controller:IsValid() then
+        print(string.format("%sF9 ignored: no valid player pawn\n", MOD))
+        return
+    end
     local pawn = controller.Pawn
-    if not pawn or not pawn:IsValid() then return end
+    if not pawn or not pawn:IsValid() then
+        print(string.format("%sF9 ignored: no valid player pawn\n", MOD))
+        return
+    end
 
     local location = pawn:K2_GetActorLocation()
     if not location or not is_finite_number(location.X) or not is_finite_number(location.Y) or not is_finite_number(location.Z) then return end
@@ -109,14 +115,19 @@ local function draw_local_action_marker()
     local base_y = rendered_local_action_y
     local base_z = rendered_local_action_z
     local yaw = rendered_local_action_yaw
+    local yaw_radians = math.rad(yaw)
 
-    -- Vertical beacon pillar above player head
-    local pillar_bottom = { X = base_x, Y = base_y, Z = base_z + 180.0 }
-    local pillar_top = { X = base_x, Y = base_y, Z = base_z + 480.0 }
+    -- Offset marker ~150 units forward along yaw in front of player
+    local marker_x = base_x + math.cos(yaw_radians) * 150.0
+    local marker_y = base_y + math.sin(yaw_radians) * 150.0
+
+    -- Vertical beacon pillar in front of player (base_z to base_z + 300.0, lowered from base_z + 180.0..base_z + 480.0)
+    local pillar_bottom = { X = marker_x, Y = marker_y, Z = base_z }
+    local pillar_top = { X = marker_x, Y = marker_y, Z = base_z + 300.0 }
     kismet_system_library:DrawDebugLine(pawn, pillar_bottom, pillar_top, color, 0.12, 6.0)
 
-    -- Above-head beacon capsule
-    local beacon_center = { X = base_x, Y = base_y, Z = base_z + 240.0 }
+    -- Forward beacon capsule in front of player (base_z + 150.0, lowered from base_z + 240.0)
+    local beacon_center = { X = marker_x, Y = marker_y, Z = base_z + 150.0 }
     local capsule_rotation = { Pitch = 0.0, Yaw = yaw, Roll = 0.0 }
     kismet_system_library:DrawDebugCapsule(pawn, beacon_center, 40.0, 30.0, capsule_rotation, color, 0.12, 4.0)
 
@@ -130,7 +141,6 @@ local function draw_local_action_marker()
     kismet_system_library:DrawDebugLine(pawn, cross_y1, cross_y2, color, 0.12, 4.0)
 
     -- Directional arrow preserving yaw
-    local yaw_radians = math.rad(yaw)
     local arrow_len = 120.0
     local arrow_tip = {
         X = beacon_center.X + math.cos(yaw_radians) * arrow_len,
@@ -156,7 +166,7 @@ local function draw_local_action_marker()
     kismet_system_library:DrawDebugLine(pawn, arrow_tip, arrow_right, color, 0.12, 5.0)
 
     pcall(function()
-        kismet_system_library:DrawDebugString(pawn, { X = base_x, Y = base_y, Z = base_z + 500.0 }, last_local_action_name or "Ping", pawn, color, 0.12)
+        kismet_system_library:DrawDebugString(pawn, { X = marker_x, Y = marker_y, Z = base_z + 320.0 }, last_local_action_name or "Ping", pawn, color, 0.12)
     end)
 end
 

@@ -360,7 +360,10 @@ Assert-True ($drawLocalActionBlock -match 'DrawDebugCapsule') 'local action mark
 Assert-True ($drawLocalActionBlock -match 'DrawDebugLine') 'local action marker must draw debug facing line'
 Assert-True ($drawLocalActionBlock -match 'DrawDebugString') 'local action marker must include guarded DrawDebugString'
 Assert-True ($drawLocalActionBlock -match 'pcall\(function\(\)') 'local action marker DrawDebugString must be guarded with pcall'
-Assert-True ($drawLocalActionBlock -match 'base_z\s*\+\s*180\.0' -and $drawLocalActionBlock -match 'base_z\s*\+\s*240\.0') 'local action marker must position beacon above player head'
+Assert-True ($drawLocalActionBlock -match 'marker_x\s*=\s*base_x\s*\+\s*math\.cos\(yaw_radians\)\s*\*\s*150\.0' -and $drawLocalActionBlock -match 'marker_y\s*=\s*base_y\s*\+\s*math\.sin\(yaw_radians\)\s*\*\s*150\.0') 'local action marker must offset marker forward by 150 units along yaw'
+Assert-True ($drawLocalActionBlock -match 'pillar_bottom\s*=\s*\{\s*X\s*=\s*marker_x,\s*Y\s*=\s*marker_y,\s*Z\s*=\s*base_z\s*\}' -and $drawLocalActionBlock -match 'pillar_top\s*=\s*\{\s*X\s*=\s*marker_x,\s*Y\s*=\s*marker_y,\s*Z\s*=\s*base_z\s*\+\s*300\.0\s*\}') 'local action marker must position vertical pillar from base_z to base_z + 300.0'
+Assert-True ($drawLocalActionBlock -match 'beacon_center\s*=\s*\{\s*X\s*=\s*marker_x,\s*Y\s*=\s*marker_y,\s*Z\s*=\s*base_z\s*\+\s*150\.0\s*\}') 'local action marker must position beacon center at base_z + 150.0'
+Assert-True ($drawLocalActionBlock -match 'DrawDebugString\(pawn,\s*\{\s*X\s*=\s*marker_x,\s*Y\s*=\s*marker_y,\s*Z\s*=\s*base_z\s*\+\s*320\.0\s*\}') 'local action marker must position debug label at base_z + 320.0'
 Assert-True ($drawLocalActionBlock -match 'math\.rad\(yaw\s*\+\s*150\.0\)' -and $drawLocalActionBlock -match 'math\.rad\(yaw\s*-\s*150\.0\)') 'local action marker must draw directional arrow wings'
 
 # Remote action marker rendering

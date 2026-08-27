@@ -25,3 +25,4 @@ tasks/research/*.md
 !tasks/research/.gitkeep
 __pycache__/
 *.pyc
+.claude/
