@@ -1,7 +1,25 @@
 $ErrorActionPreference = 'Stop'
 
-$scriptPath = Join-Path $PSScriptRoot '..\mod\scripts\main.lua'
-$source = Get-Content -Raw $scriptPath
+$scriptsDir = Join-Path $PSScriptRoot '..\mod\scripts'
+$scriptFiles = @(
+    'coop_util.lua',
+    'coop_bridge.lua',
+    'coop_remote_avatar.lua',
+    'coop_actions.lua',
+    'main.lua'
+)
+
+$sources = @{}
+foreach ($file in $scriptFiles) {
+    $filePath = Join-Path $scriptsDir $file
+    if (-not (Test-Path -LiteralPath $filePath)) {
+        throw "FAIL: Script file $file must exist"
+    }
+    $sources[$file] = Get-Content -Raw -LiteralPath $filePath
+}
+
+# Aggregate source for global pattern checks and block extraction
+$source = ($scriptFiles | ForEach-Object { $sources[$_] }) -join "`n"
 
 function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw "FAIL: $Message" }
@@ -14,6 +32,16 @@ function Get-LuaFunctionBlock([string] $Name) {
     if ($nextFunction -lt 0) { $nextFunction = $source.Length }
     return $source.Substring($start, $nextFunction - $start)
 }
+
+# Module structure and loading checks
+Assert-True ($sources['main.lua'] -match 'dofile\(mod_dir\s*\.\.\s*"/scripts/coop_util\.lua"\)') 'main.lua must load coop_util'
+Assert-True ($sources['main.lua'] -match 'dofile\(mod_dir\s*\.\.\s*"/scripts/coop_bridge\.lua"\)') 'main.lua must load coop_bridge'
+Assert-True ($sources['main.lua'] -match 'dofile\(mod_dir\s*\.\.\s*"/scripts/coop_remote_avatar\.lua"\)') 'main.lua must load coop_remote_avatar'
+Assert-True ($sources['main.lua'] -match 'dofile\(mod_dir\s*\.\.\s*"/scripts/coop_actions\.lua"\)') 'main.lua must load coop_actions'
+Assert-True ($sources['coop_util.lua'] -match 'return\s+coop_util') 'coop_util must return module table'
+Assert-True ($sources['coop_bridge.lua'] -match 'return\s+coop_bridge') 'coop_bridge must return module table'
+Assert-True ($sources['coop_remote_avatar.lua'] -match 'return\s+coop_remote_avatar') 'coop_remote_avatar must return module table'
+Assert-True ($sources['coop_actions.lua'] -match 'return\s+coop_actions') 'coop_actions must return module table'
 
 function Is-FiniteNumber($Value) {
     return $Value -is [double] -and -not [double]::IsNaN($Value) -and -not [double]::IsInfinity($Value)
@@ -32,6 +60,18 @@ function Lerp-RemoteYaw([double] $Rendered, [double] $Target, [double] $Alpha) {
     return Normalize-Yaw ($Rendered + $delta * $Alpha)
 }
 
+function Invert-LookYaw([double] $Yaw) {
+    return Normalize-Yaw ($Yaw + 180.0)
+}
+
+# Inverting look yaw by 180 degrees reference math
+Assert-True ([math]::Abs((Invert-LookYaw 0.0) - (-180.0)) -lt 0.0001 -or [math]::Abs((Invert-LookYaw 0.0) - (180.0)) -lt 0.0001) 'inverting 0 yaw must yield +-180'
+Assert-True ([math]::Abs((Invert-LookYaw 90.0) - (-90.0)) -lt 0.0001) 'inverting 90 yaw must yield -90'
+Assert-True ([math]::Abs((Invert-LookYaw -90.0) - (90.0)) -lt 0.0001) 'inverting -90 yaw must yield 90'
+Assert-True ([math]::Abs((Invert-LookYaw 45.0) - (-135.0)) -lt 0.0001) 'inverting 45 yaw must yield -135'
+Assert-True ([math]::Abs((Invert-LookYaw -45.0) - (135.0)) -lt 0.0001) 'inverting -45 yaw must yield 135'
+
+$captureBlock = Get-LuaFunctionBlock 'capture_local_player'
 $consumeBlock = Get-LuaFunctionBlock 'consume_remote_player'
 $drawBlock = Get-LuaFunctionBlock 'draw_remote_marker'
 $readAllStart = $source.IndexOf('local function read_all(path)')
@@ -39,6 +79,30 @@ Assert-True ($readAllStart -ge 0) 'Lua function read_all must exist'
 $readAllEnd = $source.IndexOf("`nlocal function ", $readAllStart + 1)
 if ($readAllEnd -lt 0) { $readAllEnd = $source.Length }
 $readAllBlock = $source.Substring($readAllStart, $readAllEnd - $readAllStart)
+
+# Floor Z and look yaw capture checks
+$floorZBlock = Get-LuaFunctionBlock 'get_local_floor_z'
+$lookYawBlock = Get-LuaFunctionBlock 'get_local_look_yaw'
+
+Assert-True ($source -match 'local function get_local_floor_z') 'Lua must define a floor Z helper'
+Assert-True ($floorZBlock -match 'pcall\(function\(\)') 'floor Z helper must use guarded pcall blocks'
+Assert-True ($floorZBlock -match 'GetScaledCapsuleHalfHeight|GetUnscaledCapsuleHalfHeight|CapsuleHalfHeight') 'floor Z helper must inspect capsule half-height'
+Assert-True ($floorZBlock -match 'GetLocalBounds') 'floor Z helper must inspect mesh bounds as fallback'
+Assert-True ($floorZBlock -match 'K2_GetActorLocation') 'floor Z helper must fall back to actor location Z'
+
+Assert-True ($source -match 'local function get_local_look_yaw') 'Lua must define a look yaw helper'
+Assert-True ($lookYawBlock -match 'pcall\(function\(\)') 'look yaw helper must use guarded pcall blocks'
+Assert-True ($lookYawBlock -match 'GetControlRotation|ControlRotation') 'look yaw helper must inspect control rotation'
+Assert-True ($lookYawBlock -match 'K2_GetActorRotation') 'look yaw helper must fall back to pawn actor rotation'
+
+Assert-True ($source -match 'local function invert_look_yaw') 'Lua must define an inverted look yaw helper'
+$invertYawBlock = Get-LuaFunctionBlock 'invert_look_yaw'
+Assert-True ($invertYawBlock -match 'normalize_yaw\(.*?\+\s*180') 'invert_look_yaw helper must add 180 degrees and normalize'
+
+Assert-True ($captureBlock -match 'get_local_floor_z\(pawn\)') 'capture_local_player must use floor Z helper'
+Assert-True ($captureBlock -match 'get_local_look_yaw\(controller,\s*pawn\)') 'capture_local_player must use look yaw helper'
+Assert-True ($captureBlock -match 'invert_look_yaw\(') 'capture_local_player must invert captured look yaw by 180 degrees before serialization'
+Assert-True ($captureBlock -match 'atomic_write\(local_state,\s*string\.format\("%d\|%\.3f\|%\.3f\|%\.3f\|%\.3f"') 'capture_local_player must format sequence|x|y|z|yaw'
 
 # UE4SS rejects the Lua "*a" read format; one-line records must use the default read mode.
 Assert-True ($readAllBlock -match 'file:read\(\)') 'read_all must read without a format argument'
@@ -114,6 +178,7 @@ $cleanupActorBlock = Get-LuaFunctionBlock 'cleanup_proxy_actor'
 $cleanupBlock = Get-LuaFunctionBlock 'cleanup_remote_player_proxy'
 $hideBlock = Get-LuaFunctionBlock 'hide_remote_player_proxy'
 $drawBlock = Get-LuaFunctionBlock 'draw_remote_marker'
+$copyTransformBlock = Get-LuaFunctionBlock 'copy_relative_transform'
 
 Assert-True ($source -match 'local\s+skeletal_mesh_actor_class\s*=\s*nil') 'proxy actor class must be cached lazily'
 Assert-True ($source -match 'local\s+remote_player_proxy\s*=\s*nil') 'only one remote proxy reference may be retained'
@@ -122,13 +187,13 @@ Assert-True ($proxyFailureBlock -match 'proxy_failure_reasons\[reason\]') 'disti
 Assert-True ($source -match 'local\s+remote_player_proxy_pawn_identity\s*=\s*nil') 'proxy pawn identity must be cached'
 Assert-True ($source -match 'local\s+remote_player_proxy_world_identity\s*=\s*nil') 'proxy world identity must be cached'
 Assert-True ($source -match 'local\s+remote_player_proxy_mesh_identity\s*=\s*nil') 'proxy mesh identity must be cached'
-Assert-True ($source -match 'local function safe_object_identity\(object\)') 'proxy identity must use a safe identity helper'
+Assert-True ($source -match 'local function safe_object_identity\(object\)' -or $source -match 'safe_object_identity\s*=\s*function') 'proxy identity must use a safe identity helper'
 Assert-True ($source -match 'object:GetAddress\(\)') 'proxy identity helper must prefer stable object addresses'
 
 $candidateSpawn = $proxyBlock.IndexOf('candidate = world:SpawnActor(skeletal_mesh_actor_class, location, rotation)')
 $candidateCollision = $proxyBlock.IndexOf('candidate:SetActorEnableCollision(false)')
 $candidateHide = $proxyBlock.IndexOf('candidate:SetActorHiddenInGame(true)')
-$candidateMesh = $proxyBlock.IndexOf('proxy_mesh:SetSkeletalMesh(mesh_asset)')
+$candidateMesh = $proxyBlock.IndexOf('proxy_mesh:SetSkeletalMesh(mesh_asset, true)')
 $candidateMove = $proxyBlock.IndexOf('candidate:K2_SetActorLocationAndRotation(location, rotation, false, {}, false)')
 $candidateShow = $proxyBlock.IndexOf('candidate:SetActorHiddenInGame(false)')
 $candidatePublish = $proxyBlock.IndexOf('remote_player_proxy = candidate')
@@ -192,11 +257,46 @@ Assert-True ($proxyBlock -notmatch 'SpawnActor\(pawn:GetClass\(\)') 'proxy must 
 Assert-True ($proxyBlock -match 'pawn\.Mesh') 'proxy source component must be pawn.Mesh'
 Assert-True ($proxyBlock -match 'mesh_component\.SkeletalMesh') 'proxy source asset must be pawn.Mesh.SkeletalMesh'
 Assert-True ($proxyBlock -match 'candidate\.SkeletalMeshComponent') 'proxy destination must be SkeletalMeshComponent'
-Assert-True ($proxyBlock -match 'SetSkeletalMesh\(mesh_asset\)') 'proxy must prefer SetSkeletalMesh for mesh copy'
+Assert-True ($proxyBlock -match 'SetSkeletalMesh\(mesh_asset,\s*true\)') 'proxy must prefer SetSkeletalMesh with pose reinitialization for mesh copy'
 Assert-True ($proxyBlock -match 'proxy_mesh\.SkeletalMesh\s*=\s*mesh_asset') 'proxy must safely fall back to skeletal-mesh property assignment'
+Assert-True ($proxyBlock -match 'SetSkeletalMesh\(mesh_asset,\s*true\)') 'proxy mesh assignment must reinitialize its pose and render state'
+Assert-True ($proxyBlock -match 'copy_relative_transform\(mesh_component,\s*proxy_mesh\)') 'proxy setup must copy source mesh relative transform to proxy mesh component'
+Assert-True ($proxyBlock -match 'proxy_mesh:SetVisibility\(true,\s*true\)') 'proxy mesh component must be made visible recursively'
+Assert-True ($proxyBlock -match 'proxy_mesh:SetHiddenInGame\(false,\s*true\)') 'proxy mesh component must be unhidden recursively'
 Assert-True ($proxyBlock -match 'SetActorEnableCollision\(false\)') 'proxy collision must be disabled'
 Assert-True ($proxyBlock -match 'K2_SetActorLocationAndRotation\(location, rotation, false, \{\}, false\)') 'proxy must use the smoothed location and yaw transform'
 Assert-True ($proxyBlock -match 'pcall\(function\(\)') 'uncertain UE proxy operations must stay inside a local pcall'
+
+Assert-True ($source -match 'local function copy_relative_transform') 'Lua must define a relative transform copy helper'
+Assert-True ($copyTransformBlock -match 'RelativeLocation') 'relative transform copy helper must read RelativeLocation'
+Assert-True ($copyTransformBlock -match 'RelativeRotation') 'relative transform copy helper must read RelativeRotation'
+Assert-True ($copyTransformBlock -match 'RelativeScale3D') 'relative transform copy helper must read RelativeScale3D'
+Assert-True ($copyTransformBlock -match 'K2_SetRelativeLocationAndRotation') 'relative transform copy helper must attempt K2_SetRelativeLocationAndRotation'
+Assert-True ($copyTransformBlock -match 'pcall\(function\(\)') 'relative transform copy operations must stay inside guarded pcall blocks'
+
+# Relative mesh yaw compensation helper and proxy rotation alignment
+Assert-True ($source -match 'local function get_source_mesh_relative_yaw') 'Lua must define a source mesh relative yaw helper'
+$yawCompBlock = Get-LuaFunctionBlock 'get_source_mesh_relative_yaw'
+Assert-True ($yawCompBlock -match 'pcall\(function\(\)') 'source mesh relative yaw helper must use guarded pcall blocks'
+Assert-True ($yawCompBlock -match 'pawn\.Mesh|mesh\.RelativeRotation|RelativeRotation\.Yaw') 'source mesh relative yaw helper must inspect pawn mesh relative rotation yaw'
+Assert-True ($yawCompBlock -match 'is_finite_number') 'source mesh relative yaw helper must check finite numbers'
+
+Assert-True ($proxyBlock -match 'get_source_mesh_relative_yaw\(pawn\)') 'update_remote_player_proxy must obtain source mesh relative yaw'
+Assert-True ($proxyBlock -match 'normalize_yaw\(rendered_remote_yaw\s*-\s*') 'update_remote_player_proxy must subtract relative yaw from rendered remote yaw to compute compensated proxy actor yaw'
+$compActorYaw = $proxyBlock.IndexOf('normalize_yaw(rendered_remote_yaw -')
+$rotationDef = $proxyBlock.IndexOf('local rotation = { Pitch = 0.0, Yaw =')
+Assert-True ($compActorYaw -ge 0 -and $rotationDef -ge 0) 'proxy rotation must use compensated actor yaw'
+Assert-True ($proxyBlock -match 'Yaw = proxy_actor_yaw|Yaw = compensated_yaw') 'proxy rotation struct must use the compensated yaw'
+
+# Ensure ready proxy update uses the compensated rotation
+$readyUpdate = $proxyBlock.IndexOf('remote_player_proxy:K2_SetActorLocationAndRotation(location, rotation, false, {}, false)')
+Assert-True ($readyUpdate -gt $rotationDef) 'ready proxy update must use the compensated rotation'
+
+# Ensure candidate spawn and update use the compensated rotation
+$candidateSpawnWithRot = $proxyBlock.IndexOf('world:SpawnActor(skeletal_mesh_actor_class, location, rotation)')
+$candidateUpdateWithRot = $proxyBlock.IndexOf('candidate:K2_SetActorLocationAndRotation(location, rotation, false, {}, false)')
+Assert-True ($candidateSpawnWithRot -gt $rotationDef) 'candidate spawn must use the compensated rotation'
+Assert-True ($candidateUpdateWithRot -gt $rotationDef) 'candidate update must use the compensated rotation'
 
 $staleCheck = $drawBlock.IndexOf('os.clock() - last_remote_update > 2.0')
 $staleHide = $drawBlock.IndexOf('hide_remote_player_proxy()')
@@ -206,8 +306,8 @@ $capsuleDraw = $drawBlock.IndexOf('DrawDebugCapsule')
 Assert-True ($staleCheck -ge 0 -and $staleHide -gt $staleCheck) 'stale remote state must hide an existing proxy before return'
 Assert-True ($staleReturn -gt $staleHide) 'stale remote state must return after hiding'
 Assert-True ($drawBlock.Substring($staleCheck, $staleReturn - $staleCheck) -notmatch 'K2_DestroyActor') 'ordinary stale state must not destroy a ready proxy'
-Assert-True ($proxyUpdate -ge 0 -and $proxyUpdate -lt $capsuleDraw) 'proxy must be updated before deciding whether to draw fallback'
-Assert-True ($drawBlock -match 'if has_valid_remote_player_proxy\(\) then return end') 'valid proxy must suppress the debug capsule fallback'
+Assert-True ($proxyUpdate -ge 0 -and $proxyUpdate -lt $capsuleDraw) 'proxy must be updated before drawing the guaranteed marker'
+Assert-True ($drawBlock -notmatch 'if has_valid_remote_player_proxy\(\) then return end') 'a valid but invisible proxy must not suppress the guaranteed marker'
 Assert-True ($proxyValidityBlock -match 'remote_player_proxy:IsValid\(\)') 'proxy validity must be checked before use'
 $controllerCheck = $drawBlock.IndexOf('if not controller or not controller:IsValid() then')
 $controllerHide = $drawBlock.IndexOf('hide_remote_player_proxy()', $controllerCheck)
@@ -216,4 +316,67 @@ $pawnHide = $drawBlock.IndexOf('hide_remote_player_proxy()', $pawnCheck)
 Assert-True ($controllerCheck -ge 0 -and $controllerHide -gt $controllerCheck) 'invalid controller must hide an existing proxy before return'
 Assert-True ($pawnCheck -ge 0 -and $pawnHide -gt $pawnCheck) 'invalid pawn must hide an existing proxy before return'
 
-Write-Output 'PASS: Lua remote avatar source and reference math checks'
+# Action event bus v1 checks
+Assert-True ($source -match 'local\s+local_action\s*=\s*bridge_dir\s*\.\.\s*"/local_action\.txt"') 'Lua must define local action path'
+Assert-True ($source -match 'local\s+remote_action\s*=\s*bridge_dir\s*\.\.\s*"/remote_action\.txt"') 'Lua must define remote action path'
+Assert-True ($source -match 'local\s+action_sequence\s*=\s*0') 'Lua must define separate action sequence'
+Assert-True ($source -match 'local\s+last_local_action_sequence\s*=\s*-1') 'Lua must define local action sequence tracker'
+Assert-True ($source -match 'local\s+last_remote_action_sequence\s*=\s*-1') 'Lua must define remote action sequence tracker'
+
+$emitActionBlock = Get-LuaFunctionBlock 'emit_local_action'
+$consumeActionBlock = Get-LuaFunctionBlock 'consume_remote_action'
+$drawLocalActionBlock = Get-LuaFunctionBlock 'draw_local_action_marker'
+$drawRemoteActionBlock = Get-LuaFunctionBlock 'draw_remote_action_marker'
+
+Assert-True ($emitActionBlock -match 'UEHelpers:GetPlayerController\(\)') 'emit_local_action must check player controller'
+Assert-True ($emitActionBlock -match 'get_local_floor_z\(pawn\)') 'emit_local_action must use floor Z helper'
+Assert-True ($emitActionBlock -match 'get_local_look_yaw\(controller,\s*pawn\)') 'emit_local_action must use look yaw helper'
+Assert-True ($emitActionBlock -match 'invert_look_yaw\(') 'emit_local_action must invert look yaw'
+Assert-True ($emitActionBlock -match 'action_sequence\s*=\s*action_sequence\s*\+\s*1') 'emit_local_action must increment action sequence'
+Assert-True ($emitActionBlock -match 'atomic_write\(local_action,\s*string\.format\("%d\|%s\|%\.3f\|%\.3f\|%\.3f\|%\.3f"') 'emit_local_action must format action_sequence|action_name|x|y|z|yaw'
+Assert-True ($emitActionBlock -match 'last_local_action_sequence\s*=\s*action_sequence') 'emit_local_action must update local action sequence state'
+Assert-True ($emitActionBlock -match 'rendered_local_action_x\s*=\s*location\.X') 'emit_local_action must record local action X location'
+Assert-True ($emitActionBlock -match 'rendered_local_action_y\s*=\s*location\.Y') 'emit_local_action must record local action Y location'
+Assert-True ($emitActionBlock -match 'rendered_local_action_z\s*=\s*floor_z') 'emit_local_action must record local action Z location'
+Assert-True ($emitActionBlock -match 'rendered_local_action_yaw\s*=\s*normalize_yaw\(look_yaw\)') 'emit_local_action must record local action yaw'
+Assert-True ($emitActionBlock -match 'last_local_action_time\s*=\s*os\.clock\(\)') 'emit_local_action must record local action timestamp'
+Assert-True ($source -match 'RegisterKeyBind\(Key\.F9,') 'Lua must register F9 keybind for action emission'
+
+# Remote action consumption guards and separation
+$actionDuplicateReject = $consumeActionBlock.IndexOf('remote_action_sequence == last_remote_action_sequence')
+$actionFiniteReject = $consumeActionBlock.IndexOf('is_finite_number(remote_action_sequence)')
+$actionMutation = $consumeActionBlock.IndexOf('last_remote_action_sequence = remote_action_sequence')
+Assert-True ($actionDuplicateReject -ge 0 -and $actionDuplicateReject -lt $actionMutation) 'duplicate action sequence rejection must precede action state mutation'
+Assert-True ($actionFiniteReject -ge 0 -and $actionFiniteReject -lt $actionMutation) 'finite action sequence rejection must precede action state mutation'
+foreach ($field in @('remote_x', 'remote_y', 'remote_z', 'remote_yaw')) {
+    $guard = $consumeActionBlock.IndexOf("is_finite_number($field)")
+    Assert-True ($guard -ge 0 -and $guard -lt $actionMutation) "finite action $field rejection must precede action state mutation"
+}
+
+# Local action marker rendering
+Assert-True ($drawLocalActionBlock -match 'last_local_action_sequence\s*<\s*0') 'local action marker must check local action sequence validity'
+Assert-True ($drawLocalActionBlock -match 'os\.clock\(\)\s*-\s*last_local_action_time\s*>\s*5\.0') 'local action marker lifetime must be at least 5 seconds'
+Assert-True ($drawLocalActionBlock -match 'DrawDebugCapsule') 'local action marker must draw debug capsule'
+Assert-True ($drawLocalActionBlock -match 'DrawDebugLine') 'local action marker must draw debug facing line'
+Assert-True ($drawLocalActionBlock -match 'DrawDebugString') 'local action marker must include guarded DrawDebugString'
+Assert-True ($drawLocalActionBlock -match 'pcall\(function\(\)') 'local action marker DrawDebugString must be guarded with pcall'
+
+# Remote action marker rendering
+Assert-True ($drawRemoteActionBlock -match 'last_remote_action_sequence\s*<\s*0') 'remote action marker must check remote action sequence validity'
+Assert-True ($drawRemoteActionBlock -match 'os\.clock\(\)\s*-\s*last_remote_action_time\s*>\s*5\.0') 'remote action marker lifetime must be at least 5 seconds'
+Assert-True ($drawRemoteActionBlock -match 'DrawDebugCapsule') 'remote action marker must draw debug capsule'
+Assert-True ($drawRemoteActionBlock -match 'DrawDebugLine') 'remote action marker must draw debug facing line'
+Assert-True ($drawRemoteActionBlock -match 'DrawDebugString') 'remote action marker must include guarded DrawDebugString'
+Assert-True ($drawRemoteActionBlock -match 'pcall\(function\(\)') 'remote action marker DrawDebugString must be guarded with pcall'
+
+# Distinct colors for local and remote action markers
+Assert-True ($drawLocalActionBlock -match 'R\s*=\s*1\.0,\s*G\s*=\s*0\.85,\s*B\s*=\s*0\.0') 'local action marker must use distinct local color'
+Assert-True ($drawRemoteActionBlock -match 'R\s*=\s*0\.0,\s*G\s*=\s*1\.0,\s*B\s*=\s*1\.0') 'remote action marker must use distinct remote color'
+
+# Tick loop integration
+$tickBlock = Get-LuaFunctionBlock 'tick'
+Assert-True ($tickBlock -match 'consume_remote_action\(\)') 'tick must call consume_remote_action'
+Assert-True ($tickBlock -match 'draw_local_action_marker\(\)') 'tick must call draw_local_action_marker'
+Assert-True ($tickBlock -match 'draw_remote_action_marker\(\)') 'tick must call draw_remote_action_marker'
+
+Write-Output 'PASS: Lua remote avatar and action event source and reference math checks'

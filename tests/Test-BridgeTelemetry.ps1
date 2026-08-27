@@ -28,9 +28,11 @@ try {
     if ($clientOutput -notmatch 'CONNECTED peer=TestHost.*distance=5\.0m') { throw "Client telemetry missing or incorrect:`n$clientOutput" }
 }
 finally {
-    if ($hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force }
-    if ($clientProcess -and -not $clientProcess.HasExited) { Stop-Process -Id $clientProcess.Id -Force }
-    if (Test-Path $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
+    if ($hostProcess -and -not $hostProcess.HasExited) { Stop-Process -Id $hostProcess.Id -Force; $hostProcess.WaitForExit(1000) | Out-Null }
+    if ($clientProcess -and -not $clientProcess.HasExited) { Stop-Process -Id $clientProcess.Id -Force; $clientProcess.WaitForExit(1000) | Out-Null }
+    if (Test-Path $testRoot) {
+        try { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    }
 }
 
 Write-Output 'PASS: both bridges print peer telemetry and distance.'
