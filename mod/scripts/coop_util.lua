@@ -46,6 +46,20 @@ local function read_all(path)
     return value
 end
 
+local function read_all_lines(path)
+    if not path then return {} end
+    local file = io.open(path, "r")
+    if not file then return {} end
+    local lines = {}
+    for line in file:lines() do
+        if line and line ~= "" then
+            lines[#lines + 1] = line
+        end
+    end
+    file:close()
+    return lines
+end
+
 local function split(value)
     local result = {}
     for part in string.gmatch(value or "", "([^|]+)") do
@@ -183,6 +197,7 @@ coop_util.read_config = read_config
 coop_util.safe_argument = safe_argument
 coop_util.atomic_write = atomic_write
 coop_util.read_all = read_all
+coop_util.read_all_lines = read_all_lines
 coop_util.split = split
 coop_util.get_local_floor_z = get_local_floor_z
 coop_util.get_local_look_yaw = get_local_look_yaw
