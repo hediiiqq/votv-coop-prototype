@@ -43,11 +43,21 @@ if (!int.TryParse(staleTimeoutMsStr, CultureInfo.InvariantCulture, out var stale
     staleTimeoutMs = 12000;
 }
 
+var maxRetryAttemptsStr = Get("--max-retry-attempts", "25");
+if (!int.TryParse(maxRetryAttemptsStr, CultureInfo.InvariantCulture, out var maxRetryAttempts) || maxRetryAttempts <= 0)
+{
+    maxRetryAttempts = 25;
+}
+
 Directory.CreateDirectory(bridgeDirectory);
 var localStatePath = Path.Combine(bridgeDirectory, "local_state.txt");
 var remoteStatePath = Path.Combine(bridgeDirectory, "remote_state.txt");
 var localActionPath = Path.Combine(bridgeDirectory, "local_action.txt");
 var remoteActionPath = Path.Combine(bridgeDirectory, "remote_action.txt");
+var localInteractPath = Path.Combine(bridgeDirectory, "local_interact.txt");
+var remoteInteractPath = Path.Combine(bridgeDirectory, "remote_interact.txt");
+var localWorldStatePath = Path.Combine(bridgeDirectory, "local_world_state.txt");
+var remoteWorldStatePath = Path.Combine(bridgeDirectory, "remote_world_state.txt");
 var statusPath = Path.Combine(bridgeDirectory, "status.txt");
 
 UdpClient udp;
@@ -103,12 +113,53 @@ using (udp)
 
     long lastSequence = -1;
     long lastActionSequence = -1;
+    long lastLocalInteractSequence = -1;
+    long lastLocalWorldSequence = -1;
+
     long lastHello = 0;
     long lastPeerPacket = 0;
     long lastTelemetry = 0;
     string? peerName = null;
     double remoteX = 0, remoteY = 0, remoteZ = 0;
     bool hasRemoteState = false;
+
+    // Host-side world state cache: objectId -> (statePayload, sequence)
+    var worldCache = new Dictionary<string, (string state, long seq)>();
+
+    // Reliable delivery retry queue
+    var pendingReliablePackets = new List<PendingReliablePacket>();
+
+    // Deduplication sets & version trackers (bounded sliding window sets)
+    var processedInteractSeqs = new SlidingSet<long>(2048);
+    var processedWorldSeqs = new SlidingSet<long>(2048);
+    var objectLatestSeq = new Dictionary<string, long>();
+    string? lastError = null;
+
+    const int maxLogBufferSize = 1024;
+    var remoteInteractsBuffer = new List<string>();
+    var remoteWorldStatesBuffer = new List<string>();
+
+    void SendReliable(string type, long sequence, string rawPacket, long currentTick)
+    {
+        if (peer != null)
+        {
+            Send(udp, peer, rawPacket);
+        }
+        if (!pendingReliablePackets.Any(p => p.Type == type && p.Sequence == sequence))
+        {
+            pendingReliablePackets.Add(new PendingReliablePacket
+            {
+                Type = type,
+                Sequence = sequence,
+                RawPacket = rawPacket,
+                LastSentTick = currentTick,
+                AttemptCount = 1,
+                MaxAttempts = maxRetryAttempts,
+                RetryIntervalMs = 100
+            });
+        }
+    }
+
     using var cancellation = new CancellationTokenSource();
     Console.CancelKeyPress += (_, eventArgs) => { eventArgs.Cancel = true; cancellation.Cancel(); };
 
@@ -160,6 +211,9 @@ using (udp)
             lastHello = now;
         }
 
+        bool hasNewInteracts = false;
+        bool hasNewWorldStates = false;
+
         try
         {
             while (udp.Available > 0)
@@ -171,15 +225,41 @@ using (udp)
 
                 if (role == "host" && fields[1] == "HELLO")
                 {
+                    bool isNewConnection = peer == null || !peer.Equals(source) || (lastPeerPacket != 0 && now - lastPeerPacket > 4000);
                     peer = source;
                     Send(udp, peer, $"{Protocol}|WELCOME|{playerName}");
                     lastPeerPacket = now;
                     Console.WriteLine($"Peer connected: {source}");
+
+                    if (isNewConnection)
+                    {
+                        processedInteractSeqs.Clear();
+                        remoteInteractsBuffer.Clear();
+                        lastError = null;
+                        pendingReliablePackets.RemoveAll(p => p.Type == "STATE");
+                        foreach (var kvp in worldCache)
+                        {
+                            var objId = kvp.Key;
+                            var (cachedState, cachedSeq) = kvp.Value;
+                            var snapshotPacket = $"{Protocol}|WORLD_STATE|{cachedSeq}|{playerName}|{objId}|{cachedState}";
+                            SendReliable("STATE", cachedSeq, snapshotPacket, now);
+                            Console.WriteLine($"WORLD_STATE snapshot sent #{cachedSeq}: {objId} = {cachedState}");
+                        }
+                    }
                 }
                 else if (fields[1] == "WELCOME")
                 {
+                    bool isNewConnection = peer == null || !peer.Equals(source) || (lastPeerPacket != 0 && now - lastPeerPacket > 4000);
                     peer = source;
                     lastPeerPacket = now;
+                    if (isNewConnection)
+                    {
+                        processedWorldSeqs.Clear();
+                        objectLatestSeq.Clear();
+                        remoteWorldStatesBuffer.Clear();
+                        lastError = null;
+                        Console.WriteLine($"Connected to host: {source}, session state reset.");
+                    }
                 }
                 else if (fields[1] == "STATE" && fields.Length >= 8)
                 {
@@ -197,9 +277,112 @@ using (udp)
                     WriteAtomic(remoteActionPath, actionPayload);
                     Console.WriteLine($"ACTION received from {fields[2]}: {actionPayload}");
                 }
+                else if (fields[1] == "INTERACT_REQ" && fields.Length >= 6)
+                {
+                    lastPeerPacket = now;
+                    if (long.TryParse(fields[2], out var reqSeq))
+                    {
+                        var senderName = fields[3];
+                        var objectId = fields[4];
+                        var actionPayload = string.Join('|', fields.Skip(5));
+
+                        // Always send ACK back to sender immediately (even if duplicate)
+                        Send(udp, source, $"{Protocol}|WORLD_ACK|REQ|{reqSeq}|{playerName}");
+
+                        if (role == "host")
+                        {
+                            if (processedInteractSeqs.Add(reqSeq))
+                            {
+                                var payload = $"{senderName}|{reqSeq}|{objectId}|{actionPayload}";
+                                remoteInteractsBuffer.Add(payload);
+                                if (remoteInteractsBuffer.Count > maxLogBufferSize)
+                                {
+                                    remoteInteractsBuffer.RemoveRange(0, remoteInteractsBuffer.Count - maxLogBufferSize);
+                                }
+                                hasNewInteracts = true;
+                                Console.WriteLine($"INTERACT_REQ received from {senderName}: #{reqSeq} {objectId} -> {actionPayload}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"INTERACT_REQ duplicate ignored #{reqSeq} from {senderName}");
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"INTERACT_REQ ignored: receiver is {role}, not host");
+                        }
+                    }
+                }
+                else if (fields[1] == "WORLD_STATE" && fields.Length >= 6)
+                {
+                    lastPeerPacket = now;
+                    if (long.TryParse(fields[2], out var stateSeq))
+                    {
+                        var hostSender = fields[3];
+                        var objectId = fields[4];
+                        var statePayload = string.Join('|', fields.Skip(5));
+
+                        // Always send ACK back to host sender immediately
+                        Send(udp, source, $"{Protocol}|WORLD_ACK|STATE|{stateSeq}|{playerName}");
+
+                        if (role == "client")
+                        {
+                            if (objectLatestSeq.TryGetValue(objectId, out var lastSeq) && stateSeq < lastSeq)
+                            {
+                                Console.WriteLine($"WORLD_STATE outdated ignored #{stateSeq} for {objectId} (current #{lastSeq})");
+                            }
+                            else if (objectLatestSeq.TryGetValue(objectId, out var currentSeq) && stateSeq == currentSeq)
+                            {
+                                Console.WriteLine($"WORLD_STATE duplicate ignored #{stateSeq} from {hostSender}");
+                            }
+                            else
+                            {
+                                processedWorldSeqs.Add(stateSeq);
+                                objectLatestSeq[objectId] = stateSeq;
+                                var payload = $"{hostSender}|{stateSeq}|{objectId}|{statePayload}";
+                                remoteWorldStatesBuffer.Add(payload);
+                                if (remoteWorldStatesBuffer.Count > maxLogBufferSize)
+                                {
+                                    remoteWorldStatesBuffer.RemoveRange(0, remoteWorldStatesBuffer.Count - maxLogBufferSize);
+                                }
+                                hasNewWorldStates = true;
+                                Console.WriteLine($"WORLD_STATE received from {hostSender}: #{stateSeq} {objectId} = {statePayload}");
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"WORLD_STATE ignored from {hostSender}: host ignores remote WORLD_STATE");
+                        }
+                    }
+                }
+                else if (fields[1] == "WORLD_ACK" && fields.Length >= 4)
+                {
+                    lastPeerPacket = now;
+                    var ackType = fields[2].ToUpperInvariant();
+                    if (ackType == "INTERACT_REQ") ackType = "REQ";
+                    if (ackType == "WORLD_STATE") ackType = "STATE";
+                    if (long.TryParse(fields[3], out var ackSeq))
+                    {
+                        var removed = pendingReliablePackets.RemoveAll(p => p.Type == ackType && p.Sequence == ackSeq);
+                        if (removed > 0)
+                        {
+                            Console.WriteLine($"WORLD_ACK received for {ackType} #{ackSeq}");
+                        }
+                    }
+                }
             }
         }
         catch (SocketException) { }
+
+        if (hasNewInteracts)
+        {
+            WriteAtomic(remoteInteractPath, string.Join("\n", remoteInteractsBuffer));
+        }
+
+        if (hasNewWorldStates)
+        {
+            WriteAtomic(remoteWorldStatePath, string.Join("\n", remoteWorldStatesBuffer));
+        }
 
         if (peer != null && TryReadState(localStatePath, out var state, out var sequence) && sequence != lastSequence)
         {
@@ -214,8 +397,73 @@ using (udp)
             Console.WriteLine($"ACTION sent #{actionSequence}: {action}");
         }
 
+        if (role == "client" && TryReadInteracts(localInteractPath, out var interacts, out var _))
+        {
+            foreach (var item in interacts)
+            {
+                if (item.seq > lastLocalInteractSequence)
+                {
+                    var packet = $"{Protocol}|INTERACT_REQ|{item.seq}|{playerName}|{item.objId}|{item.action}";
+                    SendReliable("REQ", item.seq, packet, now);
+                    lastLocalInteractSequence = Math.Max(lastLocalInteractSequence, item.seq);
+                    Console.WriteLine($"INTERACT_REQ sent #{item.seq}: {item.objId} -> {item.action}");
+                }
+            }
+        }
+
+        if (role == "host" && TryReadWorldStates(localWorldStatePath, out var worldStates, out var _))
+        {
+            foreach (var item in worldStates)
+            {
+                if (item.seq > lastLocalWorldSequence)
+                {
+                    worldCache[item.objId] = (item.state, item.seq);
+                    if (peer != null)
+                    {
+                        var packet = $"{Protocol}|WORLD_STATE|{item.seq}|{playerName}|{item.objId}|{item.state}";
+                        SendReliable("STATE", item.seq, packet, now);
+                        Console.WriteLine($"WORLD_STATE sent #{item.seq}: {item.objId} = {item.state}");
+                    }
+                    lastLocalWorldSequence = Math.Max(lastLocalWorldSequence, item.seq);
+                }
+            }
+        }
+
+        if (peer != null)
+        {
+            for (int i = pendingReliablePackets.Count - 1; i >= 0; i--)
+            {
+                var pending = pendingReliablePackets[i];
+                if (now - pending.LastSentTick >= pending.RetryIntervalMs)
+                {
+                    if (pending.AttemptCount >= pending.MaxAttempts)
+                    {
+                        var typeName = pending.Type == "REQ" ? "INTERACT_REQ" : "WORLD_STATE";
+                        Console.WriteLine($"Reliable packet {typeName} #{pending.Sequence} exceeded max attempts ({pending.MaxAttempts}), giving up.");
+                        lastError = $"retransmit_exhausted_{pending.Type.ToLowerInvariant()}";
+                        pendingReliablePackets.RemoveAt(i);
+                        continue;
+                    }
+                    pending.AttemptCount++;
+                    pending.LastSentTick = now;
+                    Send(udp, peer, pending.RawPacket);
+                    var typeName2 = pending.Type == "REQ" ? "INTERACT_REQ" : "WORLD_STATE";
+                    Console.WriteLine($"{typeName2} retry #{pending.Sequence} (attempt {pending.AttemptCount})");
+                }
+            }
+        }
+
         var connected = peer != null && lastPeerPacket != 0 && now - lastPeerPacket < 5000;
-        WriteAtomic(statusPath, $"{(connected ? "connected" : "waiting")}|{role}|{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}");
+        string statusValue;
+        if (lastError != null)
+        {
+            statusValue = $"error|{lastError}|{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        }
+        else
+        {
+            statusValue = $"{(connected ? "connected" : "waiting")}|{role}|{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        }
+        WriteAtomic(statusPath, statusValue);
         if (connected && hasRemoteState && peerName != null && now - lastTelemetry >= 1000
             && TryReadPosition(localStatePath, out var localX, out var localY, out var localZ))
         {
@@ -244,66 +492,183 @@ static void Send(UdpClient udp, IPEndPoint endpoint, string value)
     udp.Send(bytes, bytes.Length, endpoint);
 }
 
+static string? ReadAllTextShared(string path)
+{
+    try
+    {
+        if (!File.Exists(path)) return null;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+    catch (IOException) { return null; }
+    catch (UnauthorizedAccessException) { return null; }
+}
+
+static List<string>? ReadAllLinesShared(string path)
+{
+    try
+    {
+        if (!File.Exists(path)) return null;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        var lines = new List<string>();
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            lines.Add(line);
+        }
+        return lines;
+    }
+    catch (IOException) { return null; }
+    catch (UnauthorizedAccessException) { return null; }
+}
+
 static bool TryReadState(string path, out string payload, out long sequence)
 {
     payload = "";
     sequence = -1;
-    try
-    {
-        if (!File.Exists(path)) return false;
-        var value = File.ReadAllText(path).Trim();
-        var separator = value.IndexOf('|');
-        if (separator < 1 || !long.TryParse(value[..separator], out sequence)) return false;
-        payload = value;
-        return true;
-    }
-    catch (IOException) { return false; }
-    catch (UnauthorizedAccessException) { return false; }
+    var value = ReadAllTextShared(path)?.Trim();
+    if (string.IsNullOrEmpty(value)) return false;
+    var separator = value.IndexOf('|');
+    if (separator < 1 || !long.TryParse(value[..separator], out sequence)) return false;
+    payload = value;
+    return true;
 }
 
 static bool TryReadAction(string path, out string payload, out long sequence)
 {
     payload = "";
     sequence = -1;
-    try
+    var value = ReadAllTextShared(path)?.Trim();
+    if (string.IsNullOrEmpty(value)) return false;
+    var separator = value.IndexOf('|');
+    if (separator < 1 || !long.TryParse(value[..separator], out sequence)) return false;
+    var fields = value.Split('|');
+    if (fields.Length < 6) return false;
+    payload = value;
+    return true;
+}
+
+static bool TryReadInteracts(string path, out List<(long seq, string objId, string action)> entries, out long maxSeq)
+{
+    entries = new List<(long, string, string)>();
+    maxSeq = -1;
+    var lines = ReadAllLinesShared(path);
+    if (lines == null || lines.Count == 0) return false;
+    foreach (var rawLine in lines)
     {
-        if (!File.Exists(path)) return false;
-        var value = File.ReadAllText(path).Trim();
-        var separator = value.IndexOf('|');
-        if (separator < 1 || !long.TryParse(value[..separator], out sequence)) return false;
-        var fields = value.Split('|');
-        if (fields.Length < 6) return false;
-        payload = value;
-        return true;
+        var line = rawLine.Trim();
+        if (string.IsNullOrEmpty(line)) continue;
+        var fields = line.Split('|');
+        if (fields.Length < 3) continue;
+        if (!long.TryParse(fields[0], out var seq)) continue;
+        var objId = fields[1];
+        var action = string.Join('|', fields.Skip(2));
+        entries.Add((seq, objId, action));
+        if (seq > maxSeq) maxSeq = seq;
     }
-    catch (IOException) { return false; }
-    catch (UnauthorizedAccessException) { return false; }
+    return entries.Count > 0;
+}
+
+static bool TryReadWorldStates(string path, out List<(long seq, string objId, string state)> entries, out long maxSeq)
+{
+    entries = new List<(long, string, string)>();
+    maxSeq = -1;
+    var lines = ReadAllLinesShared(path);
+    if (lines == null || lines.Count == 0) return false;
+    foreach (var rawLine in lines)
+    {
+        var line = rawLine.Trim();
+        if (string.IsNullOrEmpty(line)) continue;
+        var fields = line.Split('|');
+        if (fields.Length < 3) continue;
+        if (!long.TryParse(fields[0], out var seq)) continue;
+        var objId = fields[1];
+        var state = string.Join('|', fields.Skip(2));
+        entries.Add((seq, objId, state));
+        if (seq > maxSeq) maxSeq = seq;
+    }
+    return entries.Count > 0;
 }
 
 static bool TryReadPosition(string path, out double x, out double y, out double z)
 {
     x = y = z = 0;
-    try
-    {
-        if (!File.Exists(path)) return false;
-        var fields = File.ReadAllText(path).Trim().Split('|');
-        return fields.Length >= 4
-            && double.TryParse(fields[1], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
-            && double.TryParse(fields[2], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
-            && double.TryParse(fields[3], NumberStyles.Float, CultureInfo.InvariantCulture, out z);
-    }
-    catch (IOException) { return false; }
-    catch (UnauthorizedAccessException) { return false; }
+    var text = ReadAllTextShared(path)?.Trim();
+    if (string.IsNullOrEmpty(text)) return false;
+    var fields = text.Split('|');
+    return fields.Length >= 4
+        && double.TryParse(fields[1], NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+        && double.TryParse(fields[2], NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+        && double.TryParse(fields[3], NumberStyles.Float, CultureInfo.InvariantCulture, out z);
 }
 
 static void WriteAtomic(string path, string value)
 {
-    var temporary = path + ".tmp";
+    var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
     try
     {
-        File.WriteAllText(temporary, value, Encoding.UTF8);
+        using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+        using (var writer = new StreamWriter(stream, Encoding.UTF8))
+        {
+            writer.Write(value);
+        }
         File.Move(temporary, path, true);
     }
     catch (IOException) { }
     catch (UnauthorizedAccessException) { }
+    finally
+    {
+        try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
+    }
+}
+
+class SlidingSet<T> where T : notnull
+{
+    private readonly int _capacity;
+    private readonly HashSet<T> _set = new();
+    private readonly Queue<T> _queue = new();
+
+    public SlidingSet(int capacity = 2048)
+    {
+        _capacity = capacity;
+    }
+
+    public bool Add(T item)
+    {
+        if (_set.Contains(item))
+            return false;
+
+        if (_queue.Count >= _capacity)
+        {
+            var oldest = _queue.Dequeue();
+            _set.Remove(oldest);
+        }
+
+        _queue.Enqueue(item);
+        _set.Add(item);
+        return true;
+    }
+
+    public bool Contains(T item) => _set.Contains(item);
+
+    public void Clear()
+    {
+        _set.Clear();
+        _queue.Clear();
+    }
+
+    public int Count => _set.Count;
+}
+
+class PendingReliablePacket
+{
+    public string Type { get; set; } = "";
+    public long Sequence { get; set; }
+    public string RawPacket { get; set; } = "";
+    public long LastSentTick { get; set; }
+    public int AttemptCount { get; set; } = 1;
+    public int MaxAttempts { get; set; } = 25;
+    public long RetryIntervalMs { get; set; } = 100;
 }
