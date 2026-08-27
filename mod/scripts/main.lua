@@ -9,6 +9,7 @@ local coop_util = dofile(mod_dir .. "/scripts/coop_util.lua")
 local coop_bridge = dofile(mod_dir .. "/scripts/coop_bridge.lua")
 local coop_remote_avatar = dofile(mod_dir .. "/scripts/coop_remote_avatar.lua")
 local coop_actions = dofile(mod_dir .. "/scripts/coop_actions.lua")
+local diag_interact = dofile(mod_dir .. "/scripts/diag_interact.lua")
 
 local config = coop_util.read_config(mod_dir .. "/config.ini")
 local bridge_dir = mod_dir .. "/runtime"
@@ -36,6 +37,13 @@ local avatar = coop_remote_avatar.create({
 })
 
 local actions = coop_actions.create({
+    UEHelpers = UEHelpers,
+    MOD = MOD,
+    paths = paths,
+    util = coop_util,
+})
+
+local diag = diag_interact.create({
     UEHelpers = UEHelpers,
     MOD = MOD,
     paths = paths,
@@ -70,6 +78,10 @@ end)
 
 RegisterKeyBind(Key.F9, function()
     actions.emit_local_action("Ping")
+end)
+
+RegisterKeyBind(Key.F10, function()
+    diag.inspect_object_under_crosshair()
 end)
 
 coop_bridge.start_bridge(mod_dir, bridge_dir, config, coop_util)
