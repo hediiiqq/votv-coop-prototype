@@ -33,6 +33,14 @@ local remote_has_rendered_state = false
 local remote_smoothing = 0.2
 local last_remote_update = 0
 local kismet_system_library = nil
+local skeletal_mesh_actor_class = nil
+local remote_player_proxy = nil
+local remote_player_proxy_ready = false
+local remote_player_proxy_pawn_identity = nil
+local remote_player_proxy_world_identity = nil
+local remote_player_proxy_mesh_identity = nil
+local proxy_failure_reasons = {}
+local proxy_failure_interval = 5.0
 
 local function safe_argument(value)
     return '"' .. tostring(value):gsub('"', '') .. '"'
@@ -123,8 +131,245 @@ local function consume_remote_player()
     last_remote_update = os.clock()
 end
 
+local function log_proxy_failure(reason)
+    local now = os.clock()
+    local previous = proxy_failure_reasons[reason]
+    if not previous or now - previous >= proxy_failure_interval then
+        proxy_failure_reasons[reason] = now
+        print(MOD .. "remote proxy unavailable: " .. reason .. "\n")
+    end
+end
+
+local function safe_full_name(object)
+    local ok, full_name = pcall(function()
+        return object:GetFullName()
+    end)
+    if ok and full_name then return tostring(full_name) end
+    return "<unknown>"
+end
+
+local function has_valid_remote_player_proxy()
+    local ok, valid = pcall(function()
+        return remote_player_proxy_ready and remote_player_proxy and remote_player_proxy:IsValid()
+    end)
+    return ok and valid
+end
+
+local function safe_object_identity(object)
+    if not object then return nil end
+    local ok, address = pcall(function()
+        return object:GetAddress()
+    end)
+    if ok and address ~= nil then return "address:" .. tostring(address) end
+    return object
+end
+
+local function cleanup_proxy_actor(proxy, reason)
+    if not proxy then return true end
+
+    local valid_ok, valid_result = pcall(function()
+        return proxy:IsValid()
+    end)
+    if not valid_ok then
+        log_proxy_failure("could not verify proxy before cleanup (" .. tostring(reason) .. "): " .. tostring(valid_result))
+        return false
+    end
+    if not valid_result then return true end
+
+    local collision_ok, collision_error = pcall(function()
+        proxy:SetActorEnableCollision(false)
+    end)
+    if not collision_ok then log_proxy_failure("could not disable proxy collision before cleanup (" .. tostring(reason) .. "): " .. tostring(collision_error)) end
+
+    local hide_ok, hide_error = pcall(function()
+        proxy:SetActorHiddenInGame(true)
+    end)
+    if not hide_ok then log_proxy_failure("could not hide proxy before destroy (" .. tostring(reason) .. "): " .. tostring(hide_error)) end
+
+    local destroy_ok, destroy_error = pcall(function()
+        proxy:K2_DestroyActor()
+    end)
+    if not destroy_ok then
+        log_proxy_failure("could not destroy proxy (" .. tostring(reason) .. "): " .. tostring(destroy_error))
+        return false
+    end
+
+    local verify_ok, still_valid = pcall(function()
+        return proxy:IsValid()
+    end)
+    if not verify_ok then
+        log_proxy_failure("could not verify proxy after destroy (" .. tostring(reason) .. "): " .. tostring(still_valid))
+        return false
+    end
+    if still_valid then
+        log_proxy_failure("proxy remained valid after destroy (" .. tostring(reason) .. ")")
+        return false
+    end
+    return true
+end
+
+local function cleanup_remote_player_proxy(reason)
+    local proxy = remote_player_proxy
+    remote_player_proxy_ready = false
+    if not proxy then
+        remote_player_proxy_pawn_identity = nil
+        remote_player_proxy_world_identity = nil
+        remote_player_proxy_mesh_identity = nil
+        return true
+    end
+
+    if not cleanup_proxy_actor(proxy, reason) then
+        log_proxy_failure("proxy cleanup unresolved (" .. tostring(reason) .. ")")
+        return false
+    end
+
+    remote_player_proxy = nil
+    remote_player_proxy_pawn_identity = nil
+    remote_player_proxy_world_identity = nil
+    remote_player_proxy_mesh_identity = nil
+    return true
+end
+
+local function hide_remote_player_proxy()
+    if not remote_player_proxy then return end
+    local proxy = remote_player_proxy
+    local ok, error_message = pcall(function()
+        if not proxy:IsValid() then error("proxy is invalid") end
+        proxy:SetActorHiddenInGame(true)
+    end)
+    if not ok then
+        remote_player_proxy_ready = false
+        log_proxy_failure("could not hide proxy: " .. tostring(error_message))
+    end
+end
+
+local function update_remote_player_proxy(pawn)
+    local candidate = nil
+    local candidate_pawn_identity = nil
+    local candidate_world_identity = nil
+    local candidate_mesh_identity = nil
+    local ok, success_or_error = pcall(function()
+        local location = { X = rendered_remote_x, Y = rendered_remote_y, Z = rendered_remote_z }
+        local rotation = { Pitch = 0.0, Yaw = rendered_remote_yaw, Roll = 0.0 }
+
+        local pawn_identity = safe_object_identity(pawn)
+        if not pawn_identity then error("local pawn identity is unavailable") end
+        local world = pawn:GetWorld()
+        if not world or not world:IsValid() then error("local pawn world is invalid") end
+        local world_identity = safe_object_identity(world)
+        if not world_identity then error("local pawn world identity is unavailable") end
+        local mesh_component = pawn.Mesh
+        if not mesh_component or not mesh_component:IsValid() then error("local pawn Mesh is invalid") end
+        local mesh_asset = mesh_component.SkeletalMesh
+        if not mesh_asset or not mesh_asset:IsValid() then error("local pawn Mesh.SkeletalMesh is invalid") end
+        local mesh_identity = safe_object_identity(mesh_asset)
+        if not mesh_identity then error("local pawn mesh identity is unavailable") end
+        candidate_pawn_identity = pawn_identity
+        candidate_world_identity = world_identity
+        candidate_mesh_identity = mesh_identity
+
+        local identity_changed = remote_player_proxy_pawn_identity ~= nil
+            and (remote_player_proxy_pawn_identity ~= pawn_identity
+                or remote_player_proxy_world_identity ~= world_identity
+                or remote_player_proxy_mesh_identity ~= mesh_identity)
+        if identity_changed then
+            if not cleanup_remote_player_proxy("local pawn/world/mesh changed") then
+                error("proxy cleanup failed after local identity change")
+            end
+        end
+
+        if remote_player_proxy then
+            local proxy_valid_ok, proxy_valid_result = pcall(function()
+                return remote_player_proxy:IsValid()
+            end)
+            if not proxy_valid_ok then
+                remote_player_proxy_ready = false
+                error("existing proxy validity check failed")
+            end
+            if proxy_valid_result and remote_player_proxy_ready then
+                local collision_ok, collision_error = pcall(function()
+                    remote_player_proxy:SetActorEnableCollision(false)
+                end)
+                if not collision_ok then
+                    error("could not disable collision on ready proxy: " .. tostring(collision_error))
+                end
+                remote_player_proxy:SetActorHiddenInGame(false)
+                remote_player_proxy:K2_SetActorLocationAndRotation(location, rotation, false, {}, false)
+                return true
+            end
+            if not cleanup_remote_player_proxy("unready or invalid proxy") then
+                error("existing proxy cleanup failed")
+            end
+        end
+
+        if not skeletal_mesh_actor_class or not skeletal_mesh_actor_class:IsValid() then
+            skeletal_mesh_actor_class = StaticFindObject("/Script/Engine.SkeletalMeshActor")
+        end
+        if not skeletal_mesh_actor_class or not skeletal_mesh_actor_class:IsValid() then
+            error("SkeletalMeshActor class was not found")
+        end
+
+        candidate = world:SpawnActor(skeletal_mesh_actor_class, location, rotation)
+        if not candidate or not candidate:IsValid() then error("SkeletalMeshActor spawn failed") end
+        candidate:SetActorEnableCollision(false)
+        candidate:SetActorHiddenInGame(true)
+
+        local proxy_mesh = candidate.SkeletalMeshComponent
+        if not proxy_mesh or not proxy_mesh:IsValid() then error("proxy SkeletalMeshComponent is invalid") end
+        local set_mesh_ok = pcall(function()
+            proxy_mesh:SetSkeletalMesh(mesh_asset)
+        end)
+        if not set_mesh_ok then
+            proxy_mesh.SkeletalMesh = mesh_asset
+        end
+
+        candidate:K2_SetActorLocationAndRotation(location, rotation, false, {}, false)
+        candidate:SetActorHiddenInGame(false)
+
+        remote_player_proxy = candidate
+        remote_player_proxy_pawn_identity = pawn_identity
+        remote_player_proxy_world_identity = world_identity
+        remote_player_proxy_mesh_identity = mesh_identity
+        remote_player_proxy_ready = true
+        print(string.format("%sremote proxy ready: class=%s mesh=%s\n",
+            MOD, safe_full_name(pawn:GetClass()), safe_full_name(mesh_asset)))
+        candidate = nil
+        return true
+    end)
+    if not ok then
+        remote_player_proxy_ready = false
+        if candidate then
+            if not cleanup_proxy_actor(candidate, "candidate setup failed") then
+                local collision_ok, collision_error = pcall(function()
+                    candidate:SetActorEnableCollision(false)
+                end)
+                if not collision_ok then
+                    log_proxy_failure("could not disable candidate collision while tracking: " .. tostring(collision_error))
+                end
+                pcall(function()
+                    candidate:SetActorHiddenInGame(true)
+                end)
+                remote_player_proxy = candidate
+                remote_player_proxy_pawn_identity = candidate_pawn_identity
+                remote_player_proxy_world_identity = candidate_world_identity
+                remote_player_proxy_mesh_identity = candidate_mesh_identity
+                remote_player_proxy_ready = false
+                log_proxy_failure("candidate cleanup unresolved; tracking candidate")
+            end
+        elseif remote_player_proxy then
+            cleanup_remote_player_proxy("proxy update failed")
+        end
+        log_proxy_failure(tostring(success_or_error))
+        return false
+    end
+    return success_or_error == true
+end
+
 local function draw_remote_marker()
-    if last_remote_sequence < 0 or os.clock() - last_remote_update > 2.0 then return end
+    if last_remote_sequence < 0 or os.clock() - last_remote_update > 2.0 then
+        hide_remote_player_proxy()
+        return
+    end
     rendered_remote_x = rendered_remote_x + (target_remote_x - rendered_remote_x) * remote_smoothing
     rendered_remote_y = rendered_remote_y + (target_remote_y - rendered_remote_y) * remote_smoothing
     rendered_remote_z = rendered_remote_z + (target_remote_z - rendered_remote_z) * remote_smoothing
@@ -132,9 +377,18 @@ local function draw_remote_marker()
     rendered_remote_yaw = normalize_yaw(rendered_remote_yaw + yaw_delta * remote_smoothing)
 
     local controller = UEHelpers:GetPlayerController()
-    if not controller or not controller:IsValid() then return end
+    if not controller or not controller:IsValid() then
+        hide_remote_player_proxy()
+        return
+    end
     local pawn = controller.Pawn
-    if not pawn or not pawn:IsValid() then return end
+    if not pawn or not pawn:IsValid() then
+        hide_remote_player_proxy()
+        return
+    end
+
+    update_remote_player_proxy(pawn)
+    if has_valid_remote_player_proxy() then return end
 
     if not kismet_system_library or not kismet_system_library:IsValid() then
         kismet_system_library = UEHelpers.GetKismetSystemLibrary()
